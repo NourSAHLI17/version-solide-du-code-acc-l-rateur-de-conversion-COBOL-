@@ -1,0 +1,30 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+.ruff_cache/
+*.tmp
+*.log
+
+# Node.js / Next.js
+node_modules/
+.next/
+dist/
+out/
+build/
+.npm
+.eslintcache
+*.local
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Project specific
+.agents/
+.antlr/
+antlr-*.jar
