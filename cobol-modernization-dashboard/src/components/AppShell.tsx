@@ -5,12 +5,14 @@ import { usePathname } from "next/navigation";
 import { ReactNode } from "react";
 
 const NAV_ITEMS = [
-  { href: "/", label: "Overview" },
+  { href: "/", label: "Single File" },
+  { href: "/conversion", label: "Pipeline Runner" },
+  { href: "/cockpit/project", label: "Project Upload" },
+  { href: "/testing", label: "Testing Agent" },
+  { href: "/cockpit", label: "Cockpit" },
   { href: "/parser", label: "Parser" },
   { href: "/analysis", label: "Analysis" },
-  { href: "/conversion", label: "Conversion" },
   { href: "/validation", label: "Validation" },
-  { href: "/cockpit", label: "Full Pipeline" },
 ];
 
 interface AppShellProps {
@@ -28,8 +30,8 @@ export default function AppShell({ title, subtitle, children }: AppShellProps) {
         <div className="shell-brand">
           <div className="brand-mark">CAI</div>
           <div>
-            <div className="brand-title">COBOL Modernization</div>
-            <div className="brand-copy">Parser, analysis, conversion, validation</div>
+            <div className="brand-title">COBOL Modernizer</div>
+            <div className="brand-copy">Parse, analyse, convert, test</div>
           </div>
         </div>
 
@@ -48,7 +50,7 @@ export default function AppShell({ title, subtitle, children }: AppShellProps) {
 
       <div className="shell-content">
         <header className="page-hero glass-card">
-          <p className="hero-kicker">Backend Workflow</p>
+          <p className="hero-kicker">Modernization Platform</p>
           <h1>{title}</h1>
           <p className="hero-copy">{subtitle}</p>
         </header>

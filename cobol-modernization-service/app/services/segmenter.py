@@ -23,113 +23,120 @@ class CobolSegmenter:
 
     def segment(self, source_code: str, parser_output: Dict[str, object]) -> Dict[str, List[Dict[str, object]]]:
         """
-        Split COBOL source into paragraph slices and attach symbol references.
+        Split COBOL source into paragraph segments using call-graph grouping context.
 
         Args:
             source_code: Raw COBOL source code.
-            parser_output: Deterministic parser output with paragraph and symbol metadata.
+            parser_output: Deterministic parser output metadata.
 
         Returns:
-            A dictionary containing a `segments` list with paragraph-level source slices.
-
-        Example:
-            Input:
-                source_code="PROCEDURE DIVISION.\nMAIN.\n    MOVE A TO B."
-            Output:
-                {"segments": [{"paragraph_name": "MAIN", "symbol_reads": ["A"], ...}]}
+            A dictionary containing a `segments` list with one entry per paragraph.
         """
+        from app.services.pipeline_segmenter import segment_program, extract_symbol_io
 
-        paragraph_names = list(parser_output.get("paragraphs", []))
+        # Group paragraphs using graph logic
+        manifest = segment_program(parser_output)
+        graph_segments = manifest.get("segments", [])
+        
+        lines = self._preprocess_for_segmentation(source_code)
+        paragraph_to_lines = self._map_paragraphs_to_lines(lines, parser_output.get("paragraphs", []))
+        
+        symbol_names = {s["name"] for s in parser_output.get("symbol_table", [])}
         symbol_table = list(parser_output.get("symbol_table", []))
         control_flow = parser_output.get("control_flow", {"branches": [], "loops": [], "calls": []})
         operations = list(parser_output.get("operations", []))
-        lines = self._preprocess_for_segmentation(source_code)
 
+        paragraph_names = parser_output.get("paragraphs", [])
         if not paragraph_names:
+            procedure_lines = self._extract_procedure_lines(lines)
+            symbol_refs = self.extract_symbol_refs(procedure_lines, symbol_table)
+            
+            # Simple score for high-level main logic
+            has_file_io = any(op.get("type") in self.FILE_IO_TYPES for op in operations)
+            
             return {
-                "segments": [
-                    self._build_default_segment(lines, symbol_table, control_flow, operations),
-                ]
+                "segments": [{
+                    "paragraph_name": "MAIN-LOGIC",
+                    "cluster_paragraphs": ["MAIN-LOGIC"],
+                    "source_lines": procedure_lines,
+                    "symbol_reads": symbol_refs["reads"],
+                    "symbol_writes": symbol_refs["writes"],
+                    "has_file_io": has_file_io,
+                    "has_loop": bool(control_flow.get("loops")),
+                    "has_branch": bool(control_flow.get("branches")),
+                    "has_goto": any("GO TO" in line.upper() or "GOTO" in line.upper() for line in procedure_lines),
+                }]
             }
 
-        segments = []
+        result_segments = []
+        # Create a mapping from each paragraph to its cluster info
+        para_to_cluster = {}
+        for g_seg in graph_segments:
+            if g_seg["id"] == "SEG_DATA":
+                continue
+            for p_name in g_seg["paragraphs"]:
+                para_to_cluster[p_name] = g_seg
+
+        # We return one segment per paragraph name (in order) to satisfy AnalysisAgent
+        for p_name in parser_output.get("paragraphs", []):
+            g_seg = para_to_cluster.get(p_name)
+            if not g_seg:
+                continue
+
+            # Combined context for the cluster this paragraph belongs to
+            combined_lines = []
+            for cp_name in g_seg["paragraphs"]:
+                combined_lines.extend(paragraph_to_lines.get(cp_name, []))
+            
+            # Identify operations for this paragraph specifically vs the cluster
+            paragraph_operations = [op for op in operations if op.get("paragraph") == p_name]
+            cluster_operations = [op for op in operations if op.get("paragraph") in g_seg["paragraphs"]]
+            
+            # Calculate IO for this paragraph specifically for legacy test satisfaction
+            para_reads, para_writes = extract_symbol_io([p_name], operations, symbol_names)
+
+            # Identify control flow for the paragraph specifically
+            paragraph_branches = [b for b in control_flow.get("branches", []) if b.get("paragraph") == p_name]
+            paragraph_loops = [l for l in control_flow.get("loops", []) if l.get("paragraph") == p_name]
+
+            result_segments.append({
+                "paragraph_name": p_name,
+                "cluster_paragraphs": g_seg["paragraphs"],
+                "source_lines": combined_lines, # We give the full cluster source for context
+                "symbol_reads": sorted(list(para_reads)),
+                "symbol_writes": sorted(list(para_writes)),
+                "cluster_reads": sorted(list(g_seg.get("reads", []))),
+                "cluster_writes": sorted(list(g_seg.get("writes", []))),
+                "has_file_io": any(op.get("type") in self.FILE_IO_TYPES for op in cluster_operations),
+                "has_loop": bool(paragraph_loops),
+                "has_branch": bool(paragraph_branches),
+                "has_goto": any("GO TO" in line.upper() or "GOTO" in line.upper() for line in paragraph_to_lines.get(p_name, [])),
+            })
+
+        return {"segments": result_segments}
+
+    def _map_paragraphs_to_lines(self, lines: List[str], paragraph_names: List[str]) -> Dict[str, List[str]]:
+        """Maps each paragraph name to its constituent source lines."""
+        para_map = {}
         current_name = None
-        current_lines: List[str] = []
-        paragraph_set = set(paragraph_names)
+        current_lines = []
+        para_set = set(paragraph_names)
 
         for line in lines:
             stripped = line.strip()
             token = stripped[:-1] if stripped.endswith(".") else stripped
-            if token in paragraph_set and stripped.endswith("."):
+            if token in para_set and stripped.endswith("."):
                 if current_name is not None:
-                    segments.append(
-                        self._build_segment(current_name, current_lines, symbol_table, control_flow, operations)
-                    )
+                    para_map[current_name] = current_lines
                 current_name = token
                 current_lines = []
                 continue
-
             if current_name is not None:
                 current_lines.append(line)
-
+        
         if current_name is not None:
-            segments.append(
-                self._build_segment(current_name, current_lines, symbol_table, control_flow, operations)
-            )
-
-        return {"segments": segments}
-
-    def _build_default_segment(
-        self,
-        lines: List[str],
-        symbol_table: List[Dict[str, object]],
-        control_flow: Dict[str, List[Dict[str, object]]],
-        operations: List[Dict[str, object]],
-    ) -> Dict[str, object]:
-        procedure_lines = self._extract_procedure_lines(lines)
-        return self._build_segment("MAIN-LOGIC", procedure_lines, symbol_table, control_flow, operations)
-
-    def _build_segment(
-        self,
-        paragraph_name: str,
-        source_lines: List[str],
-        symbol_table: List[Dict[str, object]],
-        control_flow: Dict[str, List[Dict[str, object]]],
-        operations: List[Dict[str, object]],
-    ) -> Dict[str, object]:
-        symbol_refs = self.extract_symbol_refs(source_lines, symbol_table)
-        paragraph_operations = [
-            operation
-            for operation in operations
-            if operation.get("paragraph") == paragraph_name or (
-                paragraph_name == "MAIN-LOGIC" and "paragraph" not in operation
-            )
-        ]
-        paragraph_branches = [
-            branch
-            for branch in control_flow.get("branches", [])
-            if branch.get("paragraph") == paragraph_name or (
-                paragraph_name == "MAIN-LOGIC" and "paragraph" not in branch
-            )
-        ]
-        paragraph_loops = [
-            loop
-            for loop in control_flow.get("loops", [])
-            if loop.get("paragraph") == paragraph_name or (
-                paragraph_name == "MAIN-LOGIC" and "paragraph" not in loop
-            )
-        ]
-
-        return {
-            "paragraph_name": paragraph_name,
-            "source_lines": source_lines,
-            "symbol_reads": symbol_refs["reads"],
-            "symbol_writes": symbol_refs["writes"],
-            "has_file_io": any(operation.get("type") in self.FILE_IO_TYPES for operation in paragraph_operations),
-            "has_loop": bool(paragraph_loops),
-            "has_branch": bool(paragraph_branches),
-            "has_goto": any("GO TO" in line.upper() or "GOTO" in line.upper() for line in source_lines),
-        }
+            para_map[current_name] = current_lines
+        return para_map
 
     def extract_symbol_refs(
         self,

@@ -18,6 +18,8 @@ export interface PipelineWorkspace {
   parserResult: ParserResult;
   analysisResult: AnalysisResult;
   javaCode: string;
+  projectResults: Array<Record<string, unknown>>;
+  jclManifest?: Record<string, unknown> | null;
   validationResult: ValidationResult;
   backendStatus: BackendStatus | null;
   lastError: string | null;

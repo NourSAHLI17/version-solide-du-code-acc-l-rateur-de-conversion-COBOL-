@@ -1,74 +1,103 @@
 "use client";
 
-import Link from "next/link";
+import { useState } from "react";
 
+import ActionButton from "@/components/ActionButton";
 import AppShell from "@/components/AppShell";
+import ArtifactPanel from "@/components/ArtifactPanel";
+import CodeEditor from "@/components/CodeEditor";
+import CodePanel from "@/components/CodePanel";
 import HealthStrip from "@/components/HealthStrip";
-import MetricCard from "@/components/MetricCard";
-import { getApiRoot } from "@/lib/api";
+import PipelineModeSelector from "@/components/PipelineModeSelector";
+import PipelineProgress from "@/components/PipelineProgress";
+import StageTabs from "@/components/StageTabs";
+import { runPipelineMode } from "@/lib/api";
+import type { PipelineMode } from "@/lib/pipelineModes";
+import { PIPELINE_MODES } from "@/lib/pipelineModes";
 import { useBackendStatus } from "@/lib/useBackendStatus";
+import { useWorkspace } from "@/lib/workspace";
 
-const PAGES = [
-  {
-    href: "/parser",
-    title: "Parser Page",
-    copy: "Test the deterministic parser layer by itself and inspect structural JSON before any semantic reasoning.",
-  },
-  {
-    href: "/analysis",
-    title: "Analysis Page",
-    copy: "Run semantic analysis on parser output and inspect grounded business rules, complexity, and conversion guidance.",
-  },
-  {
-    href: "/conversion",
-    title: "Conversion Page",
-    copy: "Generate Java from COBOL, parser output, and analysis context while tracking estimated LLM cost.",
-  },
-  {
-    href: "/validation",
-    title: "Validation Page",
-    copy: "Compare expected and actual outputs independently using the backend validation service.",
-  },
-  {
-    href: "/cockpit",
-    title: "Full Pipeline Page",
-    copy: "See every step, backend health, LLM readiness, conversion status, and all generated artifacts in one place.",
-  },
+const OUTPUT_TABS = [
+  { id: "parser", label: "Parser Output", stage: "parser" as const },
+  { id: "analysis", label: "Analysis", stage: "analysis" as const },
+  { id: "java", label: "Java Output", stage: "java" as const },
+  { id: "tests", label: "Test Report", stage: "tests" as const },
 ];
 
 export default function HomePage() {
-  const { status, error } = useBackendStatus(true);
+  const { workspace, actions } = useWorkspace();
+  const { status, error, refresh, setStatus } = useBackendStatus(true);
+  const [mode, setMode] = useState<PipelineMode>("full");
+  const [activeTab, setActiveTab] = useState("java");
+  const [loading, setLoading] = useState(false);
+
+  async function runPipeline() {
+    setLoading(true);
+    actions.setLastError(null);
+    try {
+      const nextStatus = await refresh();
+      setStatus(nextStatus);
+      actions.setBackendStatus(nextStatus);
+      const payload = await runPipelineMode(workspace.sourceCode, mode, workspace.parserResult, workspace.analysisResult);
+
+      if (payload.parser_output) {
+        actions.setParserResult(payload.parser_output);
+        setActiveTab("parser");
+      }
+      if (payload.analysis_output) {
+        actions.setAnalysisResult(payload.analysis_output);
+        setActiveTab("analysis");
+      }
+      if (payload.java_source) {
+        actions.setJavaCode(payload.java_source);
+        setActiveTab("java");
+      }
+    } catch (caught) {
+      actions.setLastError(caught instanceof Error ? caught.message : "Pipeline failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <AppShell
-      title="COBOL Modernization Frontend"
-      subtitle="Each pipeline layer has its own page so users can test parser, analysis, conversion, and validation independently."
+      title="COBOL Modernizer"
+      subtitle="Run a single COBOL source through real backend pipeline modes and inspect every returned artifact."
     >
-      <HealthStrip status={status} lastError={error} />
+      <HealthStrip status={workspace.backendStatus ?? status} lastError={workspace.lastError ?? error} />
 
-      <section className="metrics-grid">
-        <MetricCard label="API Base" value={getApiRoot()} hint="Frontend target for every backend request" />
-        <MetricCard
-          label="LLM Status"
-          value={status?.llm_configured ? "Configured" : "Unavailable"}
-          hint={status?.llm_model ?? "No model reported"}
-        />
-        <MetricCard
-          label="Parser Backend"
-          value={status?.parser_backend ?? "Unknown"}
-          hint="Visible so users know which parsing engine is active"
-        />
-      </section>
+      <div className="toolbar-card glass-card">
+        <PipelineModeSelector value={mode} onChange={setMode} modes={PIPELINE_MODES} />
+        <div className="action-row">
+          <ActionButton variant="secondary" onClick={actions.reset}>
+            Reset
+          </ActionButton>
+          <ActionButton onClick={runPipeline} disabled={loading}>
+            {loading ? "Running Pipeline..." : "Run Pipeline"}
+          </ActionButton>
+        </div>
+      </div>
 
-      <section className="route-grid">
-        {PAGES.map((page) => (
-          <Link href={page.href} key={page.href} className="glass-card route-card">
-            <div className="route-tag">Step Page</div>
-            <h2>{page.title}</h2>
-            <p>{page.copy}</p>
-          </Link>
-        ))}
-      </section>
+      <PipelineProgress currentStage={loading ? "Convert" : null} mode={mode} />
+
+      <div className="overhaul-grid">
+        <CodeEditor label="COBOL Input (.cbl / .cob)" value={workspace.sourceCode} onChange={actions.setSourceCode} minHeight={460} />
+        <div className="output-card">
+          <StageTabs tabs={OUTPUT_TABS} activeTab={activeTab} onChange={setActiveTab} />
+          <div className="output-card-body">
+            {activeTab === "parser" && (
+              <ArtifactPanel title="Parser Output" data={workspace.parserResult ?? { message: "Run a parse-capable mode to see parser output." }} />
+            )}
+            {activeTab === "analysis" && (
+              <ArtifactPanel title="Analysis Output" data={workspace.analysisResult ?? { message: "Run analysis-capable mode to see semantic output." }} />
+            )}
+            {activeTab === "java" && <CodePanel title="Converted Java" code={workspace.javaCode} />}
+            {activeTab === "tests" && (
+              <ArtifactPanel title="Test Report" data={{ message: "Open Testing Agent to run full backend test reports." }} />
+            )}
+          </div>
+        </div>
+      </div>
     </AppShell>
   );
 }

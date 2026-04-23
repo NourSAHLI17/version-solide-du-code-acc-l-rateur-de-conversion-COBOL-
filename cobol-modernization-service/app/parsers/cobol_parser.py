@@ -26,51 +26,40 @@ class ParserLayer:
     """
 
     RESERVED_WORDS = {
-        "IF",
-        "ELSE",
-        "END-IF",
-        "MOVE",
-        "ADD",
-        "SUBTRACT",
-        "MULTIPLY",
-        "DIVIDE",
-        "PERFORM",
-        "CALL",
-        "READ",
-        "WRITE",
-        "REWRITE",
-        "DELETE",
-        "OPEN",
-        "CLOSE",
-        "STOP",
-        "STOP-RUN",
-        "GOBACK",
-        "EXIT",
-        "EVALUATE",
-        "WHEN",
-        "GO",
-        "GOTO",
-        "EXEC",
-        "DISPLAY",
-        "COMPUTE",
-        "INITIALIZE",
-        "STRING",
-        "UNSTRING",
-        "INSPECT",
-        "SEARCH",
-        "SET",
-        "NEXT",
-        "ACCEPT",
-        "END-PERFORM",
-        "END-EVALUATE",
-        "END-READ",
-        "END-WRITE",
-        "END-DELETE",
-        "END-REWRITE",
-        "END-CALL",
-        "END-STRING",
-        "END-UNSTRING",
-        "END-COMPUTE",
+        # Verbs / statements
+        "ACCEPT", "ADD", "ALTER", "CALL", "CANCEL", "CLOSE", "COMPUTE",
+        "CONTINUE", "DELETE", "DISPLAY", "DIVIDE", "ELSE", "END",
+        "EVALUATE", "EXEC", "EXIT", "GO", "GOTO", "GOBACK", "IF",
+        "INITIALIZE", "INSPECT", "MERGE", "MOVE", "MULTIPLY", "NEXT",
+        "OPEN", "PERFORM", "READ", "RELEASE", "RETURN", "REWRITE",
+        "SEARCH", "SET", "SORT", "START", "STOP", "STOP-RUN", "STRING",
+        "SUBTRACT", "UNSTRING", "WRITE",
+        # Scope terminators
+        "END-CALL", "END-COMPUTE", "END-DELETE", "END-EVALUATE",
+        "END-IF", "END-PERFORM", "END-READ", "END-REWRITE",
+        "END-STRING", "END-UNSTRING", "END-WRITE",
+        # Divisions / sections / structural
+        "SECTION", "DIVISION", "WORKING-STORAGE", "PROCEDURE", "DATA",
+        "ENVIRONMENT", "IDENTIFICATION", "LINKAGE", "FILE",
+        "LOCAL-STORAGE", "SCREEN", "REPORT", "COMMUNICATION",
+        # Identification division entries
+        "PROGRAM-ID", "AUTHOR", "DATE-WRITTEN", "INSTALLATION",
+        "DATE-COMPILED", "SECURITY",
+        # Environment division entries
+        "OBJECT-COMPUTER", "SOURCE-COMPUTER", "SPECIAL-NAMES",
+        "FILE-CONTROL", "I-O-CONTROL",
+        # File / data entries
+        "SELECT", "ASSIGN", "ORGANIZATION", "ACCESS", "RECORD",
+        "KEY", "STATUS", "FD", "SD", "RD", "CD",
+        # Conditional keywords
+        "WHEN", "THEN", "NOT", "AND", "OR", "ALSO", "OTHER",
+        "TRUE", "FALSE", "THRU", "THROUGH",
+        # Misc
+        "USING", "GIVING", "RETURNING", "INTO", "FROM", "TO", "BY",
+        "UNTIL", "VARYING", "AFTER", "BEFORE", "UPON", "WITH",
+        "CORRESPONDING", "CORR", "ROUNDED", "REMAINDER",
+        "ON", "SIZE", "ERROR", "OVERFLOW", "AT", "END-OF-PAGE",
+        "INVALID", "ASCENDING", "DESCENDING",
     }
 
     COBOL_SCOPE_TERMINATORS = {
@@ -148,7 +137,7 @@ class ParserLayer:
 
         source_format = self._detect_source_format(source_code)
         lines = self._preprocess(source_code, source_format)
-        preflight_errors = self._preflight_check(lines)
+        preflight_errors = self._preflight_check(lines, source_format)
         if preflight_errors:
             return self._build_preflight_failure(lines, source_format, preflight_errors)
 
@@ -275,7 +264,26 @@ class ParserLayer:
 
             if entry["indicator"] == "-" and processed:
                 previous = processed[-1]
-                previous["text"] = f"{previous['text']} {entry['text']}".strip()
+                prev_text = str(previous["text"])
+                cont_text = str(entry["text"])
+
+                sq_count = prev_text.count("'")
+                dq_count = prev_text.count('"')
+                in_string = (sq_count % 2 != 0) or (dq_count % 2 != 0)
+
+                if in_string:
+                    first_sq = cont_text.find("'")
+                    first_dq = cont_text.find('"')
+                    if first_sq >= 0 and first_dq >= 0:
+                        quote_pos = min(first_sq, first_dq)
+                    else:
+                        quote_pos = max(first_sq, first_dq)
+                    if quote_pos >= 0:
+                        cont_text = cont_text[quote_pos + 1:]
+                    previous["text"] = prev_text + cont_text
+                else:
+                    previous["text"] = f"{prev_text} {cont_text}".strip()
+
                 previous["upper"] = previous["text"].upper()
                 previous["raw_lines"].append(line)
                 previous["line_numbers"].append(line_number)
@@ -374,7 +382,7 @@ class ParserLayer:
                 sections.append(upper[:-1])
         return sections
 
-    def _extract_paragraph_index(self, lines: List[Dict[str, object]], source_format: str) -> List[str]:
+    def _extract_paragraph_index(self, lines: List[Dict[str, object]], source_format: str, allow_reserved: bool = False) -> List[str]:
         paragraphs: List[str] = []
         in_procedure = False
 
@@ -385,7 +393,7 @@ class ParserLayer:
                 continue
             if not in_procedure or upper.endswith("SECTION."):
                 continue
-            if self._is_paragraph_header(line, source_format):
+            if self._is_paragraph_header(line, source_format, allow_reserved):
                 paragraphs.append(line["text"][:-1])
 
         return paragraphs
@@ -395,6 +403,8 @@ class ParserLayer:
         in_data_division = False
         current_section = None
         stack: List[Dict[str, object]] = []
+        # Track last non-88 symbol index for condition_names linkage (REQ-4)
+        last_parent_idx: Optional[int] = None
 
         for line in lines:
             upper = line["upper"]
@@ -426,16 +436,17 @@ class ParserLayer:
                 stack.pop()
 
             parent = stack[-1]["name"] if stack else None
-            symbol = {
+            symbol: Dict[str, object] = {
                 "name": name,
                 "level": level_int,
                 "section": current_section,
                 "parent": parent,
             }
 
-            pic_match = re.search(r"\bPIC(?:TURE)?\s+([A-Z0-9\(\)SVXAN\-\+]+)", rest)
+            pic_match = re.search(r"\bPIC(?:TURE)?\s+([A-Z0-9\(\)SVXAN\-\+Z]+)", rest)
             if pic_match:
                 symbol["pic"] = pic_match.group(1)
+                symbol["pic_decoded"] = self._decode_pic(pic_match.group(1))
 
             usage_match = re.search(
                 r"\b(?:USAGE\s+IS\s+)?(COMP-3|COMP-1|COMP-2|COMP|DISPLAY|BINARY|PACKED-DECIMAL)\b",
@@ -444,7 +455,7 @@ class ParserLayer:
             if usage_match:
                 symbol["usage"] = usage_match.group(1)
 
-            value_match = re.search(r"\bVALUE\s+(.+?)(?=\b(?:PIC|REDEFINES|USAGE|OCCURS|SYNC|SIGN)\b|$)", rest)
+            value_match = re.search(r"\bVALUES?\s+(.+?)(?=\b(?:PIC|REDEFINES|USAGE|OCCURS|SYNC|SIGN)\b|$)", rest)
             if value_match:
                 symbol["value"] = value_match.group(1).strip()
 
@@ -457,12 +468,57 @@ class ParserLayer:
                 symbol["occurs"] = int(occurs_match.group(1))
 
             symbol["kind"] = self._infer_symbol_kind(symbol)
+
+            # --- 88-level condition name linkage (REQ-4) ---
+            if level_int == 88 and last_parent_idx is not None:
+                parent_sym = symbols[last_parent_idx]
+                if "condition_names" not in parent_sym:
+                    parent_sym["condition_names"] = []
+                # Extract condition values from VALUE/VALUES clause
+                cond_values = self._extract_88_values(rest)
+                parent_sym["condition_names"].append({
+                    "name": name,
+                    "values": cond_values,
+                    "kind": "condition_88",
+                })
+
             symbols.append(symbol)
 
             if level not in {"66", "77", "88"}:
                 stack.append({"level": level, "name": name})
+                last_parent_idx = len(symbols) - 1
 
         return symbols
+
+    def _extract_88_values(self, rest: str) -> List[str]:
+        """Extract condition values from an 88-level VALUE/VALUES clause.
+
+        Handles VALUE 'Y', VALUES 'Y' 'S', VALUE 1 THRU 10.
+
+        Args:
+            rest: The text after the 88-level name (VALUE clause + etc.).
+
+        Returns:
+            List of value strings.
+
+        Example:
+            Input:
+                "VALUE 'Y'"
+            Output:
+                ["Y"]
+        """
+
+        value_match = re.search(r"\bVALUES?\s+(.+?)$", rest, re.IGNORECASE)
+        if not value_match:
+            return []
+        raw = value_match.group(1).strip().rstrip(".")
+        # Extract quoted values and numeric values
+        values: List[str] = []
+        for m in re.finditer(r"'([^']*)'|\"([^\"]*)\"|([A-Z0-9][A-Z0-9-]*)", raw):
+            val = m.group(1) or m.group(2) or m.group(3)
+            if val and val.upper() not in ("THRU", "THROUGH"):
+                values.append(val)
+        return values
 
     def _infer_symbol_kind(self, symbol: Dict[str, object]) -> str:
         if symbol["level"] == 88:
@@ -480,6 +536,87 @@ class ParserLayer:
             return "numeric"
         return "unknown"
 
+    def _decode_pic(self, pic_str: str) -> Dict[str, object]:
+        """Decode a COBOL PIC clause into structured type information.
+
+        Supports: 9(n), 9(n)V9(d), S9(n), X(n), A(n), Z(n), P scaling.
+
+        Args:
+            pic_str: Raw PIC string (e.g. "9(5)V99", "X(10)", "S9(3)V9(2)").
+
+        Returns:
+            Dictionary with java_type, digit counts, and flags.
+
+        Example:
+            Input:
+                "9(5)V99"
+            Output:
+                {"raw": "9(5)V99", "is_numeric": True,
+                 "has_implied_decimal": True, "java_type": "BigDecimal",
+                 "int_digits": 5, "dec_digits": 2, ...}
+        """
+
+        pic = pic_str.upper().strip()
+        has_v = "V" in pic
+        has_s = pic.startswith("S")
+        is_numeric = bool(re.match(r"S?9", pic))
+        is_string = pic.startswith("X") or pic.startswith("A")
+        is_display_numeric = pic.startswith("Z")
+
+        def _count_digits(segment: str) -> int:
+            """Count digit positions in a PIC segment like '9(5)99'."""
+            total = 0
+            for m in re.finditer(r"9\((\d+)\)|9(?!\()", segment):
+                total += int(m.group(1)) if m.group(1) else 1
+            return total
+
+        int_digits = 0
+        dec_digits = 0
+
+        if is_numeric or is_display_numeric:
+            if has_v:
+                parts = pic.split("V", 1)
+                int_digits = _count_digits(parts[0])
+                dec_digits = _count_digits(parts[1])
+            else:
+                int_digits = _count_digits(pic)
+
+        if is_display_numeric:
+            # Z(n) — zero-suppressed display numeric
+            for m in re.finditer(r"Z\((\d+)\)|Z(?!\()", pic):
+                int_digits += int(m.group(1)) if m.group(1) else 1
+
+        # Determine java_type
+        if is_numeric:
+            java_type = "BigDecimal" if has_v else "int"
+        elif is_string:
+            java_type = "String"
+        elif is_display_numeric:
+            java_type = "String"
+        else:
+            java_type = "String"
+
+        # Calculate storage length for string types
+        storage_length = int_digits + dec_digits
+        if is_string:
+            str_match = re.search(r"[XA]\((\d+)\)", pic)
+            if str_match:
+                storage_length = int(str_match.group(1))
+            else:
+                storage_length = pic.count("X") + pic.count("A")
+
+        return {
+            "raw": pic_str,
+            "is_numeric": is_numeric,
+            "is_string": is_string,
+            "has_implied_decimal": has_v,
+            "is_signed": has_s,
+            "int_digits": int_digits,
+            "dec_digits": dec_digits,
+            "java_type": java_type,
+            "storage_length": storage_length,
+        }
+
     def _extract_control_flow(
         self,
         lines: List[Dict[str, object]],
@@ -492,7 +629,8 @@ class ParserLayer:
         in_procedure = False
         current_paragraph = None
         condition_stack: List[str] = []
-        paragraph_names = set(self._extract_paragraph_index(lines, source_format))
+        paragraph_order = self._extract_paragraph_index(lines, source_format)
+        paragraph_names = set(paragraph_order)
 
         for line in lines:
             upper = line["upper"]
@@ -625,6 +763,7 @@ class ParserLayer:
                 to_para = perform_thru.group(2)
                 until_cond = perform_thru.group(3)
                 is_conditional = len(condition_stack) > 0
+
                 call_entry = {
                     "type": "PERFORM_THRU",
                     "from": current_paragraph,
@@ -633,6 +772,27 @@ class ParserLayer:
                     "conditional": is_conditional,
                     "condition": condition_stack[-1] if is_conditional else None,
                 }
+
+                # Resolve intermediate paragraphs (REQ-5)
+                try:
+                    start_idx = paragraph_order.index(from_para)
+                    end_idx = paragraph_order.index(to_para)
+                    if start_idx <= end_idx:
+                        expanded = paragraph_order[start_idx : end_idx + 1]
+                        call_entry["thru_expanded"] = expanded
+                        for p in expanded:
+                            calls.append({
+                                "type": "PERFORM",
+                                "from": current_paragraph,
+                                "to": p,
+                                "conditional": False,
+                                "condition": None
+                            })
+                    else:
+                        call_entry["thru_expanded"] = [from_para]
+                except ValueError:
+                    call_entry["thru_expanded"] = []
+
                 calls.append(call_entry)
                 if until_cond:
                     loop = {
@@ -820,6 +980,34 @@ class ParserLayer:
         paragraph: Optional[str],
         line_number: int,
     ) -> Optional[Dict[str, object]]:
+        # --- IF ---
+        if_match = re.match(r"^IF\s+(.+?)(?:\s+THEN)?\.?$", upper_text)
+        if if_match:
+            cond = if_match.group(1).strip()
+            # Extract variables from condition
+            refs = set()
+            for m in re.finditer(r"([A-Z][A-Z0-9-]*)", cond):
+                if m.group(1) not in self.RESERVED_WORDS:
+                    refs.add(m.group(1))
+            operation = {"type": "IF", "condition": cond}
+            if refs:
+                operation["references"] = sorted(list(refs))
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
+        # --- EVALUATE ---
+        eval_match = re.match(r"^EVALUATE\s+(.+?)\.?$", upper_text)
+        if eval_match:
+            val = eval_match.group(1).strip()
+            operation = {"type": "EVALUATE", "value": val}
+            # Simple reference if it's a direct variable
+            if val not in self.RESERVED_WORDS and re.match(r"^[A-Z0-9-]+$", val):
+                operation["references"] = [val]
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
         # --- MOVE with subscript support ---
         move_match = re.match(
             r"^MOVE\s+(.+?)\s+TO\s+(.+?)\s*\.?$",
@@ -1013,16 +1201,22 @@ class ParserLayer:
         display_match = re.match(r"^DISPLAY\s+(.+?)\.?$", upper_text)
         if display_match:
             raw_value = display_match.group(1).strip()
-            refs = [
-                tok for tok in re.findall(r"[A-Z][A-Z0-9-]*(?:\([^)]+\))?", raw_value)
-                if tok not in self.RESERVED_WORDS
-                and tok not in self.FIGURATIVE_CONSTANTS
-                and not tok.startswith("'")
-                and not tok.startswith('"')
-            ]
+            refs = set()
+            # Extract plain variables and subscript arrays/indices (REQ-8)
+            for m in re.finditer(r"([A-Z][A-Z0-9-]*)(?:\(([^)]+)\))?", raw_value):
+                base_name = m.group(1)
+                subscript = m.group(2)
+                if base_name not in self.RESERVED_WORDS and base_name not in self.FIGURATIVE_CONSTANTS:
+                    refs.add(base_name)
+                if subscript:
+                    # Collect tokens from subscript (could be vars or literals)
+                    for tok in re.findall(r"[A-Z][A-Z0-9-]*", subscript):
+                        if tok not in self.RESERVED_WORDS and tok not in self.FIGURATIVE_CONSTANTS:
+                            refs.add(tok)
+
             operation = {"type": "DISPLAY", "value": raw_value}
             if refs:
-                operation["references"] = refs
+                operation["references"] = sorted(list(refs))
             if paragraph:
                 operation["paragraph"] = paragraph
             return operation
@@ -1037,24 +1231,27 @@ class ParserLayer:
 
         return None
 
-    def _extract_dependencies(
-        self,
-        lines: List[Dict[str, object]],
-        operations: List[Dict[str, object]],
-    ) -> Dict[str, List[object]]:
-        copybooks: List[str] = []
+    def _extract_dependencies(self, lines: List[Dict[str, object]], operations: List[Dict[str, object]]) -> Dict[str, object]:
+        copybooks = set()
         files = set()
+        file_bindings = {}
         external_calls = set()
 
         for index, line in enumerate(lines):
             upper = line["upper"]
             copy_match = re.match(r"^COPY\s+([A-Z0-9-]+)", upper)
             if copy_match:
-                copybooks.append(copy_match.group(1))
+                copybooks.add(copy_match.group(1))
 
-            select_match = re.match(r"^SELECT\s+([A-Z0-9-]+)\s+ASSIGN\b", upper)
+            select_match = re.search(r"^SELECT\s+([A-Z0-9-]+)\s+ASSIGN(?:\s+TO)?\s+('[^']+'|\"[^\"]+\"|[A-Z0-9-]+)", upper)
             if select_match:
-                files.add(select_match.group(1))
+                f_name = select_match.group(1)
+                files.add(f_name)
+                # Group 2 has the raw ASSIGN target. Unquote it if needed.
+                target = select_match.group(2)
+                if len(target) >= 2 and target[0] in {"'", '"'} and target[-1] == target[0]:
+                    target = target[1:-1]
+                file_bindings[f_name] = target
 
             fd_match = re.match(r"^FD\s+([A-Z0-9-]+)\.?$", upper)
             if fd_match:
@@ -1074,6 +1271,7 @@ class ParserLayer:
         return {
             "copybooks": sorted(copybooks),
             "files": sorted(files),
+            "file_bindings": file_bindings,
             "external_calls": sorted(external_calls),
         }
 
@@ -1241,12 +1439,13 @@ class ParserLayer:
 
         return warnings
 
-    def _preflight_check(self, lines: List[Dict[str, object]]) -> List[str]:
+    def _preflight_check(self, lines: List[Dict[str, object]], source_format: str) -> List[str]:
         """
         Validate structural COBOL issues before full parsing proceeds.
 
         Args:
             lines: Preprocessed COBOL source lines.
+            source_format: 'fixed' or 'free'.
 
         Returns:
             A list of blocking structural errors. An empty list means parsing can continue.
@@ -1280,6 +1479,19 @@ class ParserLayer:
         for iterator in self._collect_perform_varying_iterators(lines):
             if iterator not in declared_names:
                 errors.append(f"PERFORM VARYING uses undeclared index {iterator}.")
+
+        # 4. No reserved word used as paragraph name (REQ-2)
+        paragraphs = self._extract_paragraph_index(lines, source_format, allow_reserved=True)
+        for para in paragraphs:
+            if para in self.RESERVED_WORDS:
+                # Still allow scope terminators unless they are explicitly in Area A in fixed format.
+                # Actually, COBOL_SCOPE_TERMINATORS shouldn't be counted as custom paragraph names.
+                if para in self.COBOL_SCOPE_TERMINATORS:
+                    continue
+                # Also ignore common verbs that end with dot like EXIT, STOP-RUN, etc.
+                if para in {"STOP-RUN", "EXIT", "GOBACK", "CONTINUE"}:
+                    continue
+                errors.append(f"RESERVED WORD AS PARAGRAPH: '{para}'")
 
         return errors
 
@@ -1337,13 +1549,14 @@ class ParserLayer:
             return value[1:-1]
         return value
 
-    def _is_paragraph_header(self, line: Dict[str, object], source_format: str) -> bool:
+    def _is_paragraph_header(self, line: Dict[str, object], source_format: str, allow_reserved: bool = False) -> bool:
         """
         Determine whether a logical line is a valid paragraph header.
 
         Args:
             line: Preprocessed logical line with area metadata.
             source_format: `"fixed"` or `"free"`.
+            allow_reserved: If True, bypass reserved word validation.
 
         Returns:
             `True` only for strict paragraph labels, never for quoted strings or END-* verbs.
@@ -1369,8 +1582,9 @@ class ParserLayer:
         token = upper[:-1].strip()
         if not token or " " in token:
             return False
-        if token in self.COBOL_SCOPE_TERMINATORS or token in self.RESERVED_WORDS:
-            return False
+        if not allow_reserved:
+            if token in self.COBOL_SCOPE_TERMINATORS or token in self.RESERVED_WORDS:
+                return False
         if token.startswith('"') or token.startswith("'"):
             return False
         if not re.fullmatch(r"[A-Z0-9][A-Z0-9-]*", token):

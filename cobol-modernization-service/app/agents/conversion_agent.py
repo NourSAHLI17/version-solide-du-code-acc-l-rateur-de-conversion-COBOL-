@@ -161,6 +161,7 @@ class ConversionAgent:
         config = self._default_conversion_config(parser_output, normalized_analysis)
         parser_json = json.dumps(parser_output, indent=2, sort_keys=True)
         analysis_json = json.dumps(normalized_analysis, indent=2, sort_keys=True)
+        context_mode = self._describe_context_mode(parser_output, normalized_analysis)
         prompt = ChatPromptTemplate.from_template(
             """
 You are the Conversion Agent of a COBOL modernization system.
@@ -182,6 +183,9 @@ INPUTS:
 ### Raw COBOL Source
 {source}
 
+### Context Mode
+{context_mode}
+
 ### Parser Output
 {parser_json}
 
@@ -193,6 +197,8 @@ INPUTS:
 
 CONVERSION RULES:
 1. Preserve business behavior exactly as defined by the parser and analysis inputs.
+   If Parser Output or Analysis Output is empty, use only the context that is present
+   plus the Raw COBOL Source. Do not invent missing parser or analysis facts.
 2. Use BigDecimal for COMP-3 fields and any numeric field with implied decimal.
 3. Map COBOL paragraphs or major logic blocks to Java methods when appropriate.
 4. Convert PERFORM to structured loops or method calls.
@@ -221,6 +227,7 @@ QUALITY BAR:
         )
         return prompt, {
             "source": source_code,
+            "context_mode": context_mode,
             "parser_json": parser_json,
             "analysis_json": analysis_json,
             "conversion_config": json.dumps(config, indent=2, sort_keys=True),
@@ -444,3 +451,18 @@ QUALITY BAR:
             "generate_tests": True,
             "complexity_hint": complexity,
         }
+
+    def _describe_context_mode(
+        self,
+        parser_output: Dict[str, object],
+        analysis_output: Dict[str, object],
+    ) -> str:
+        has_parser = bool(parser_output)
+        has_analysis = bool(analysis_output)
+        if has_parser and has_analysis:
+            return "COBOL source + parser output + analysis output"
+        if has_parser:
+            return "COBOL source + parser output only"
+        if has_analysis:
+            return "COBOL source + analysis output only"
+        return "COBOL source only"

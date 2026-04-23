@@ -318,7 +318,7 @@ class ParserLayerTests(unittest.TestCase):
         """
 
         result = self.parser.parse(source)
-        self.assertEqual(result["dependencies"], {"copybooks": ["CUSTOMER-REC"], "files": [], "external_calls": []})
+        self.assertEqual(result["dependencies"], {"copybooks": ["CUSTOMER-REC"], "files": [], "file_bindings": {}, "external_calls": []})
 
     def test_redefines_and_occurs(self):
         source = """

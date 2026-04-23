@@ -18,6 +18,8 @@ function defaultWorkspace(): StoredWorkspace {
     parserResult: null,
     analysisResult: null,
     javaCode: "",
+    projectResults: [],
+    jclManifest: null,
     validationResult: null,
     backendStatus: null,
     lastError: null,
@@ -27,28 +29,33 @@ function defaultWorkspace(): StoredWorkspace {
 }
 
 export function useWorkspace() {
-  const [workspace, setWorkspace] = useState<StoredWorkspace>(() => {
-    if (typeof window === "undefined") {
-      return defaultWorkspace();
-    }
+  const [workspace, setWorkspace] = useState<StoredWorkspace>(defaultWorkspace);
+  const [hydrated, setHydrated] = useState(false);
 
+  useEffect(() => {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      return defaultWorkspace();
+      setHydrated(true);
+      return;
     }
 
     try {
       const parsed = JSON.parse(raw) as StoredWorkspace;
-      return { ...defaultWorkspace(), ...parsed };
+      setWorkspace({ ...defaultWorkspace(), ...parsed });
     } catch {
       window.localStorage.removeItem(STORAGE_KEY);
-      return defaultWorkspace();
+    } finally {
+      setHydrated(true);
     }
-  });
+  }, []);
 
   useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
-  }, [workspace]);
+  }, [hydrated, workspace]);
 
   const actions = useMemo(
     () => ({
@@ -63,6 +70,19 @@ export function useWorkspace() {
       },
       setJavaCode(javaCode: string) {
         setWorkspace((current) => ({ ...current, javaCode, lastError: null }));
+      },
+      setProjectResults(projectResults: Array<Record<string, unknown>>) {
+        setWorkspace((current) => ({ ...current, projectResults, lastError: null }));
+      },
+      setActiveArtifact(sourceCode: string, parserResult: ParserResult, analysisResult: AnalysisResult, javaCode: string) {
+        setWorkspace((current) => ({
+          ...current,
+          sourceCode,
+          parserResult,
+          analysisResult,
+          javaCode,
+          lastError: null,
+        }));
       },
       setValidationResult(validationResult: ValidationResult) {
         setWorkspace((current) => ({ ...current, validationResult, lastError: null }));
@@ -86,5 +106,5 @@ export function useWorkspace() {
     [],
   );
 
-  return { workspace, actions };
+  return { workspace, actions, hydrated };
 }
