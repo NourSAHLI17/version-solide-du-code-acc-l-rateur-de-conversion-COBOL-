@@ -7,7 +7,9 @@ This folder explains **what was implemented**, **why**, and **how it was tested*
 | 1 | [01-architecture-and-pipeline.md](./01-architecture-and-pipeline.md) | End-to-end stages (JCL → COPY → parse → enrich), diagrams, main JSON shapes |
 | 2 | [02-parser-layer-and-fixes.md](./02-parser-layer-and-fixes.md) | `ParserLayer`: FILLER, preflight, multi-line statements, copybook metadata |
 | 3 | [03-api-and-dashboard-behavior.md](./03-api-and-dashboard-behavior.md) | `/api/pipeline/run` analysis handling, localStorage, when to restart the server |
-| 4 | [04-testing-and-use-cases.md](./04-testing-and-use-cases.md) | Use Case 3 integration tests, PAYROLL-CALC multiline tests, how to run `pytest` |
+| 4 | [04-testing-and-use-cases.md](./04-testing-and-use-cases.md) | pytest, Use Case 3, PAYROLL-CALC regression pack, **three outputs** demo notes |
+| 5 | [05-hybrid-approach-quality-fixes-and-file-map.md](./05-hybrid-approach-quality-fixes-and-file-map.md) | Old vs hybrid pipeline, comparison table, complementary roles, fix list, modified files |
+| 6 | [06-manager-briefing-stack-and-messaging.md](./06-manager-briefing-stack-and-messaging.md) | Executive talking points, tech stack for slides, Q&A |
 
 **Code locations (quick reference)**
 
