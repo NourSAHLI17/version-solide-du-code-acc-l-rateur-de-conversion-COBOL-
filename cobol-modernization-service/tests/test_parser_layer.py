@@ -31,6 +31,7 @@ class ParserLayerTests(unittest.TestCase):
                     "dependencies",
                     "risk_flags",
                     "warnings",
+                    "parser_revision",
                 ]
             ),
         )

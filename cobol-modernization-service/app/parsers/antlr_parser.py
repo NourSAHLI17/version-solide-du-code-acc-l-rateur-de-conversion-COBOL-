@@ -26,6 +26,10 @@ class AntlrCobolParser:
     grammar_root = Path(__file__).resolve().parents[1] / "grammars" / "cobol85"
     generated_root = Path(__file__).resolve().parent / "generated"
 
+    def parse_and_validate(self, source_code: str) -> Dict[str, object]:
+        """Alias for :meth:`parse` — run ANTLR lexer/parser validation + heuristic JSON."""
+        return self.parse(source_code)
+
     def parse(self, source_code: str) -> Dict[str, object]:
         """
         Parse COBOL using an ANTLR-generated grammar backend.
@@ -49,7 +53,7 @@ class AntlrCobolParser:
             raise RuntimeError(
                 "ANTLR parser backend is scaffolded but not ready: "
                 f"{bullet_list}. "
-                "Generate parser artifacts from app/grammars/cobol85, install the "
+                "Generate parser artifacts from app/grammars/cobol85/Cobol85.g4, install the "
                 "Python ANTLR runtime, and implement the parse-tree adapter before "
                 "selecting PARSER_BACKEND=antlr."
             )
@@ -69,7 +73,7 @@ class AntlrCobolParser:
             Input:
                 AntlrCobolParser().missing_requirements()
             Output:
-                ["missing grammar file Cobol85Lexer.g4", ...]
+                ["missing grammar file Cobol85.g4", ...]
         """
 
         missing: List[str] = []
@@ -77,9 +81,9 @@ class AntlrCobolParser:
         if importlib.util.find_spec("antlr4") is None:
             missing.append("missing Python ANTLR runtime package 'antlr4'")
 
+        # grammars-v4 cobol85 ships as a combined grammar (lexer + parser in Cobol85.g4).
         required_grammar_files = [
-            self.grammar_root / "Cobol85Lexer.g4",
-            self.grammar_root / "Cobol85Parser.g4",
+            self.grammar_root / "Cobol85.g4",
         ]
         for grammar_file in required_grammar_files:
             if not grammar_file.exists():
@@ -88,7 +92,7 @@ class AntlrCobolParser:
         required_generated_files = [
             self.generated_root / "Cobol85Lexer.py",
             self.generated_root / "Cobol85Parser.py",
-            self.generated_root / "Cobol85ParserVisitor.py",
+            self.generated_root / "Cobol85Visitor.py",
             self.generated_root / "parse_tree_adapter.py",
         ]
         for generated_file in required_generated_files:

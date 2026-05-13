@@ -30,10 +30,17 @@ class Chunk:
         }
 
 
+# Analysis LLM reliability: avoid >10 paragraphs per chunk (token budget for JSON sections).
+_MAX_PARAGRAPHS_PER_ANALYSIS_CHUNK = 10
+_TARGET_SPLIT_CHUNK_SIZE = 8
+
+
 def chunk_segment(segment: Segment, parser_output: Dict[str, Any]) -> List[Chunk]:
-    """Split a Segment into smaller chunks if it's too complex."""
-    if not segment.requires_chunking:
-        # Return a single chunk equal to the segment itself
+    """Split a Segment into smaller chunks if it's too complex or too many paragraphs."""
+    para_count = len(segment.paragraphs)
+    must_split = segment.requires_chunking or para_count > _MAX_PARAGRAPHS_PER_ANALYSIS_CHUNK
+
+    if not must_split:
         return [Chunk(
             id=f"{segment.id}_CHUNK_0",
             segment_id=segment.id,
@@ -45,7 +52,7 @@ def chunk_segment(segment: Segment, parser_output: Dict[str, Any]) -> List[Chunk
 
     chunks = []
     current_paras = []
-    TARGET_CHUNK_SIZE = 5  # arbitrary length cutoff
+    TARGET_CHUNK_SIZE = _TARGET_SPLIT_CHUNK_SIZE
     
     # Identify paragraphs that belong to loops or complex branches 
     # to avoid splitting execution scopes blindly

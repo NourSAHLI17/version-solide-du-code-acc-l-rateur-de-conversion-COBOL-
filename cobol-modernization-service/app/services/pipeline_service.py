@@ -158,6 +158,17 @@ class PipelineService:
         # Pass expanded source to parser
         parser_output = self.parser.parse(resolution.expanded_source)
 
+        # COPY lines are expanded away — re-attach resolved copybook names for dependencies.copybooks.
+        deps = dict(parser_output.get("dependencies") or {})
+        books = {str(x).upper() for x in (deps.get("copybooks") or []) if x}
+        books.update(
+            str(e.get("name", "")).upper()
+            for e in resolution.resolved_copybooks
+            if isinstance(e, dict) and e.get("name")
+        )
+        deps["copybooks"] = sorted(books)
+        parser_output["dependencies"] = deps
+
         # Attach resolution metadata to parser output
         parser_output["resolved_copybooks"] = resolution.resolved_copybooks
         parser_output["unresolved_copybooks"] = resolution.unresolved_copybooks

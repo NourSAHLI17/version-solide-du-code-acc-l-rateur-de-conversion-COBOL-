@@ -33,20 +33,23 @@ export function useWorkspace() {
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      setHydrated(true);
-      return;
-    }
+    const id = window.setTimeout(() => {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        setHydrated(true);
+        return;
+      }
 
-    try {
-      const parsed = JSON.parse(raw) as StoredWorkspace;
-      setWorkspace({ ...defaultWorkspace(), ...parsed });
-    } catch {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } finally {
-      setHydrated(true);
-    }
+      try {
+        const parsed = JSON.parse(raw) as StoredWorkspace;
+        setWorkspace({ ...defaultWorkspace(), ...parsed });
+      } catch {
+        window.localStorage.removeItem(STORAGE_KEY);
+      } finally {
+        setHydrated(true);
+      }
+    }, 0);
+    return () => clearTimeout(id);
   }, []);
 
   useEffect(() => {
@@ -60,7 +63,15 @@ export function useWorkspace() {
   const actions = useMemo(
     () => ({
       setSourceCode(sourceCode: string) {
-        setWorkspace((current) => ({ ...current, sourceCode, lastError: null }));
+        setWorkspace((current) => ({
+          ...current,
+          sourceCode,
+          lastError: null,
+          // Invalidate downstream artifacts so analysis is not shown for the wrong program text.
+          parserResult: null,
+          analysisResult: null,
+          javaCode: "",
+        }));
       },
       setParserResult(parserResult: ParserResult) {
         setWorkspace((current) => ({ ...current, parserResult, lastError: null }));

@@ -1,9 +1,12 @@
 """API routes for parser, analysis, conversion, validation, segmentation,
 aggregation, testing, project upload, pipeline mode selection, and downloads."""
 
+import hashlib
 import io
 import json
+import logging
 import re
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -29,6 +32,27 @@ from app.services.testing_agent import run_testing_agent
 
 router = APIRouter(prefix="/api", tags=["modernization"])
 service = PipelineService()
+logger = logging.getLogger(__name__)
+
+
+def _api_source_hash8(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+def _ensure_parser_output_dict(raw: object) -> dict:
+    """Normalize parser_output to a dict (handles JSON string bodies)."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 # ── Core pipeline endpoints ───────────────────────────────────────────────────
@@ -46,9 +70,26 @@ async def parse_cobol(request: CobolRequest):
 async def analyze_cobol(request: AnalyzeRequest):
     """Analyze parser output and COBOL source into semantic conversion context."""
     try:
-        return service.analyze_cobol(request.source_code, request.parser_output)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.info(
+            "ANALYZE called: program=%s",
+            request.parser_output.get("program_name", "unknown")
+            if isinstance(request.parser_output, dict)
+            else "unknown",
+        )
+        po = request.parser_output if isinstance(request.parser_output, dict) else {}
+        program_name = po.get("program_name")
+        src_h = _api_source_hash8(request.source_code)
+        print(f"[API] analysis request for program_name={program_name!r}")
+        print(
+            "[API] returning cached=False "
+            "(no HTTP/file cache; optional in-proc memo only if ANALYSIS_ENABLE_ANALYSIS_CACHE=1)",
+        )
+        print(f"[API] source_hash={src_h}")
+        parser_out = _ensure_parser_output_dict(request.parser_output)
+        return service.analyze_cobol(request.source_code, parser_out)
+    except Exception:
+        logger.error("ANALYZE ERROR: %s", traceback.format_exc())
+        raise
 
 
 @router.post("/convert")
@@ -142,6 +183,11 @@ async def run_tests(request: TestRequest):
 async def smart_convert(request: SmartConvertRequest):
     """Intelligently modernize COBOL with optional pre-computed stages."""
     try:
+        po = request.parser_output if isinstance(request.parser_output, dict) else None
+        program_name = po.get("program_name") if po else None
+        client_analysis = bool(request.analysis_output)
+        print(f"[API] smart-convert program_name={program_name!r} client_supplied_analysis={client_analysis}")
+        print(f"[API] source_hash={_api_source_hash8(request.source_code)}")
         return service.smart_modernize(
             request.source_code,
             request.parser_output,
@@ -160,6 +206,16 @@ async def run_pipeline_mode(request: PipelineModeRequest):
     Modes: full | parse_only | parse_analyse | analyse_only | convert_only | no_parse
     """
     try:
+        po = request.parser_output if isinstance(request.parser_output, dict) else None
+        program_name = po.get("program_name") if po else None
+        client_analysis = bool(request.analysis_output)
+        print(
+            f"[API] pipeline/run mode={request.mode!r} program_name={program_name!r} "
+            f"client_supplied_analysis_output={client_analysis}",
+        )
+        if client_analysis:
+            print("[API] hint: request included analysis_output; run_pipeline_mode may skip analyze_cobol")
+        print(f"[API] source_hash={_api_source_hash8(request.cobol_source)}")
         return service.run_pipeline_mode(
             request.cobol_source,
             request.mode,

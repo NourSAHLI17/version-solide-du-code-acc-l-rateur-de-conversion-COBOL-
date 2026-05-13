@@ -1,7 +1,8 @@
 """Pydantic request schemas used by the public modernization API."""
 
+import json
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class CobolRequest(BaseModel):
@@ -11,8 +12,25 @@ class CobolRequest(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     """Request body for semantic analysis."""
+
     source_code: str = Field(..., description="Raw COBOL program text.")
-    parser_output: dict = Field(..., description="Parser-layer structured output.")
+    parser_output: dict = Field(default_factory=dict, description="Parser-layer structured output.")
+
+    @field_validator("parser_output", mode="before")
+    @classmethod
+    def _coerce_parser_output(cls, v: Any) -> dict:
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            text = v.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
 
 class ConvertRequest(BaseModel):

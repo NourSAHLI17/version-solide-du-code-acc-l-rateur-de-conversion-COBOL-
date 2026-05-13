@@ -22,8 +22,10 @@ class ModernizationAgents:
         analysis_agent: AnalysisAgent | None = None,
         conversion_agent: ConversionAgent | None = None,
     ):
-        self.analysis_agent = analysis_agent or AnalysisAgent()
         self.conversion_agent = conversion_agent or ConversionAgent()
+        self.analysis_agent = analysis_agent or AnalysisAgent(
+            conversion_agent=self.conversion_agent,
+        )
         self.llm = self.conversion_agent.llm
 
     def analyze(self, source_code: str, parser_output: dict) -> Dict[str, object]:

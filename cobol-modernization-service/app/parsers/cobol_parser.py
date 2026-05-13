@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 def text_or_upper(line: Dict[str, object]) -> str:
@@ -77,6 +77,9 @@ class ParserLayer:
         "STOP-RUN",
     }
 
+    # Data names that may repeat or must not participate in duplicate-data preflight (COBOL FILLER).
+    UNREFERENCEABLE_NAMES = frozenset({"FILLER"})
+
     STATEMENT_VERBS = {
         "DISPLAY",
         "MOVE",
@@ -145,11 +148,14 @@ class ParserLayer:
         sections = self._extract_sections(lines)
         paragraph_index = self._extract_paragraph_index(lines, source_format)
         symbol_table = self._extract_symbol_table(lines)
-        operations = self._extract_operations(lines, source_format)
+        symbol_names = {str(s["name"]) for s in symbol_table if s.get("name")}
+        operations = self._extract_operations(lines, source_format, symbol_names)
         control_flow = self._extract_control_flow(lines, source_format)
         dependencies = self._extract_dependencies(lines, operations)
-        risk_flags = self._extract_risk_flags(symbol_table, control_flow, dependencies, lines)
-        warnings = self._extract_warnings(lines, symbol_table, control_flow, operations)
+        risk_flags = self._extract_risk_flags(symbol_table, control_flow, dependencies, lines, operations)
+        warnings = self._extract_warnings(
+            lines, symbol_table, control_flow, operations, paragraph_index,
+        )
 
         return {
             "program_name": self._extract_program_name(lines),
@@ -164,6 +170,7 @@ class ParserLayer:
             "dependencies": dependencies,
             "risk_flags": risk_flags,
             "warnings": warnings,
+            "parser_revision": "2026-02-10",
         }
 
     def _build_preflight_failure(
@@ -292,7 +299,60 @@ class ParserLayer:
 
             processed.append(entry)
 
-        return processed
+        return self._merge_compute_continuations(processed)
+
+    def _merge_line_entries(
+        self,
+        a: Dict[str, object],
+        b: Dict[str, object],
+    ) -> Dict[str, object]:
+        text = f"{a['text']} {b['text']}".strip()
+        merged = dict(a)
+        merged["text"] = text
+        merged["upper"] = text.upper()
+        merged["raw_lines"] = list(a.get("raw_lines", [])) + list(b.get("raw_lines", []))
+        merged["line_numbers"] = list(a.get("line_numbers", [])) + list(b.get("line_numbers", []))
+        merged["continued"] = True
+        return merged
+
+    def _merge_compute_continuations(self, processed: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        """Join free-form lines split after '=' (COMPUTE and similar) without fixed-format '-' indicators."""
+        if len(processed) < 2:
+            return processed
+
+        verb_start = re.compile(
+            r"^\s*(ACCEPT|ADD|CALL|CLOSE|COMPUTE|DISPLAY|DIVIDE|EVALUATE|EXIT|GO\s+TO|GOBACK|IF|"
+            r"INITIALIZE|MOVE|MULTIPLY|OPEN|PERFORM|READ|RETURN|REWRITE|STOP|SUBTRACT|WRITE)\s",
+            re.I,
+        )
+        out: List[Dict[str, object]] = []
+        i = 0
+        while i < len(processed):
+            cur = processed[i]
+            i += 1
+            while i < len(processed):
+                nxt = processed[i]
+                pu = str(cur["text"]).strip()
+                if pu.endswith("."):
+                    break
+                nu = str(nxt["text"])
+                if re.match(r"^\s*(ELSE|END-IF|END-EVALUATE|END-PERFORM|END-COMPUTE)\b", nu, re.I):
+                    break
+                merge = False
+                if str(cur["upper"]).strip().endswith("="):
+                    merge = True
+                elif (
+                    "COMPUTE" in str(cur["upper"])
+                    and "=" in str(cur["upper"])
+                    and not verb_start.match(nu)
+                ):
+                    merge = True
+                if not merge:
+                    break
+                cur = self._merge_line_entries(cur, nxt)
+                i += 1
+            out.append(cur)
+        return out
 
     def _preprocess_fixed_line(self, line: str, line_number: int) -> Optional[Dict[str, object]]:
         padded = line.ljust(72)
@@ -557,9 +617,31 @@ class ParserLayer:
         """
 
         pic = pic_str.upper().strip()
+
+        # PIC V9(n) — implied decimal only (no integer digits), e.g. PIC V9(4)
+        if pic.startswith("V"):
+            dec_match = re.match(r"^V9\((\d+)\)$", pic)
+            if dec_match:
+                decimal_digits = int(dec_match.group(1))
+            else:
+                decimal_digits = len(re.findall(r"9", pic))
+                if decimal_digits < 1:
+                    decimal_digits = max(1, len(pic) - 1)
+            return {
+                "raw": pic_str,
+                "is_numeric": True,
+                "is_string": False,
+                "has_implied_decimal": True,
+                "is_signed": False,
+                "int_digits": 0,
+                "dec_digits": decimal_digits,
+                "java_type": "BigDecimal",
+                "storage_length": decimal_digits,
+            }
+
         has_v = "V" in pic
         has_s = pic.startswith("S")
-        is_numeric = bool(re.match(r"S?9", pic))
+        is_numeric = bool(re.search(r"[S9]", pic) or pic.startswith("V"))
         is_string = pic.startswith("X") or pic.startswith("A")
         is_display_numeric = pic.startswith("Z")
 
@@ -586,13 +668,14 @@ class ParserLayer:
             for m in re.finditer(r"Z\((\d+)\)|Z(?!\()", pic):
                 int_digits += int(m.group(1)) if m.group(1) else 1
 
-        # Determine java_type
-        if is_numeric:
-            java_type = "BigDecimal" if has_v else "int"
-        elif is_string:
+        # Determine java_type. Edited / zero-suppressed numerics (e.g. ZZ,ZZ9.99) store as
+        # characters in COBOL and must map to String before plain 9(n) numeric handling.
+        if is_string:
             java_type = "String"
         elif is_display_numeric:
             java_type = "String"
+        elif is_numeric:
+            java_type = "BigDecimal" if has_v else "int"
         else:
             java_type = "String"
 
@@ -907,7 +990,12 @@ class ParserLayer:
 
         return {"branches": branches, "loops": loops, "calls": calls, "gotos": gotos}
 
-    def _extract_operations(self, lines: List[Dict[str, object]], source_format: str) -> List[Dict[str, object]]:
+    def _extract_operations(
+        self,
+        lines: List[Dict[str, object]],
+        source_format: str,
+        symbol_names: Optional[Set[str]] = None,
+    ) -> List[Dict[str, object]]:
         operations: List[Dict[str, object]] = []
         in_procedure = False
         current_paragraph = None
@@ -927,7 +1015,7 @@ class ParserLayer:
             if upper.endswith("SECTION."):
                 continue
 
-            result = self._parse_operation(upper, current_paragraph, line["line_number"])
+            result = self._parse_operation(upper, current_paragraph, line["line_number"], symbol_names)
             if result:
                 if isinstance(result, list):
                     operations.extend(result)
@@ -974,12 +1062,24 @@ class ParserLayer:
             "is_array_element": False,
         }
 
+    def _arith_symbol_refs(self, expr: str, symbol_names: Optional[Set[str]]) -> List[str]:
+        if not symbol_names:
+            return []
+        refs: List[str] = []
+        for tok in re.findall(r"[A-Z][A-Z0-9-]*", expr):
+            if tok not in self.RESERVED_WORDS and tok in symbol_names:
+                refs.append(tok)
+        return sorted(set(refs))
+
     def _parse_operation(
         self,
         upper_text: str,
         paragraph: Optional[str],
         line_number: int,
+        symbol_names: Optional[Set[str]] = None,
     ) -> Optional[Dict[str, object]]:
+        upper_text = upper_text.strip()
+
         # --- IF ---
         if_match = re.match(r"^IF\s+(.+?)(?:\s+THEN)?\.?$", upper_text)
         if if_match:
@@ -1004,6 +1104,116 @@ class ParserLayer:
             # Simple reference if it's a direct variable
             if val not in self.RESERVED_WORDS and re.match(r"^[A-Z0-9-]+$", val):
                 operation["references"] = [val]
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
+        # --- WHEN (EVALUATE branch): register data refs from numeric comparisons ---
+        when_cond_match = re.match(
+            r"^WHEN\s+([A-Z][A-Z0-9-]+)\s*(?:<|>|=|<=|>=|NOT\s)",
+            upper_text,
+        )
+        if when_cond_match:
+            sym = when_cond_match.group(1)
+            operation = {"type": "WHEN", "value": when_cond_match.group(0).strip()}
+            if symbol_names and sym in symbol_names:
+                operation["references"] = [sym]
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
+        # --- COMPUTE ---
+        compute_match = re.match(
+            r"^COMPUTE\s+([A-Z0-9-]+(?:\([^)]+\))?)\s*(ROUNDED)?\s*=\s*(.+)$",
+            upper_text,
+        )
+        if compute_match:
+            target_op = self._parse_operand(compute_match.group(1).strip())
+            rounded = compute_match.group(2) is not None
+            expr = compute_match.group(3).strip().rstrip(".")
+            operation = {
+                "type": "COMPUTE",
+                "target": target_op["name"],
+                "expression": expr,
+                "rounded": rounded,
+            }
+            if target_op.get("subscript"):
+                operation["target_subscript"] = target_op["subscript"]
+            if target_op.get("is_array_element"):
+                operation["target_is_array_element"] = True
+            refs = self._arith_symbol_refs(expr, symbol_names)
+            if refs:
+                operation["references"] = refs
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
+        # --- MULTIPLY ---
+        mul_match = re.match(
+            r"^MULTIPLY\s+(.+?)\s+BY\s+([A-Z0-9-]+(?:\([^)]+\))?)(\s+ROUNDED)?",
+            upper_text,
+        )
+        if mul_match:
+            tgt = self._parse_operand(mul_match.group(2).strip())
+            operation = {
+                "type": "MULTIPLY",
+                "value": mul_match.group(1).strip(),
+                "target": tgt["name"],
+                "rounded": mul_match.group(3) is not None,
+            }
+            if tgt.get("subscript"):
+                operation["target_subscript"] = tgt["subscript"]
+            expr = f"{mul_match.group(1).strip()} * {tgt['name']}"
+            refs = self._arith_symbol_refs(expr, symbol_names)
+            if refs:
+                operation["references"] = refs
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
+        # --- DIVIDE (common forms) ---
+        divide_giving = re.match(
+            r"^DIVIDE\s+(.+?)\s+BY\s+(.+?)\s+GIVING\s+([A-Z0-9-]+(?:\([^)]+\))?)(\s+ROUNDED)?",
+            upper_text,
+        )
+        if divide_giving:
+            tgt = self._parse_operand(divide_giving.group(3).strip())
+            operation = {
+                "type": "DIVIDE",
+                "value": divide_giving.group(1).strip(),
+                "by": divide_giving.group(2).strip(),
+                "target": tgt["name"],
+                "rounded": divide_giving.group(4) is not None,
+            }
+            if tgt.get("subscript"):
+                operation["target_subscript"] = tgt["subscript"]
+            expr = f"{divide_giving.group(1)} / {divide_giving.group(2)}"
+            refs = self._arith_symbol_refs(expr, symbol_names)
+            if refs:
+                operation["references"] = refs
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
+        divide_into = re.match(
+            r"^DIVIDE\s+(.+?)\s+INTO\s+([A-Z0-9-]+(?:\([^)]+\))?)(\s+ROUNDED)?",
+            upper_text,
+        )
+        if divide_into:
+            tgt = self._parse_operand(divide_into.group(2).strip())
+            operation = {
+                "type": "DIVIDE",
+                "value": divide_into.group(1).strip(),
+                "target": tgt["name"],
+                "rounded": divide_into.group(3) is not None,
+            }
+            if tgt.get("subscript"):
+                operation["target_subscript"] = tgt["subscript"]
+            refs = self._arith_symbol_refs(divide_into.group(1), symbol_names)
+            if tgt["name"] in (symbol_names or set()):
+                refs = sorted(set(refs + [tgt["name"]]))
+            if refs:
+                operation["references"] = refs
             if paragraph:
                 operation["paragraph"] = paragraph
             return operation
@@ -1051,35 +1261,53 @@ class ParserLayer:
             return operations[0] if len(operations) == 1 else operations
 
         # --- SUBTRACT ---
-        subtract_match = re.match(r"^SUBTRACT\s+(.+?)\s+FROM\s+([A-Z0-9-]+(?:\([^)]+\))?)\.?$", upper_text)
+        subtract_match = re.match(
+            r"^SUBTRACT\s+(.+?)\s+FROM\s+([A-Z0-9-]+(?:\([^)]+\))?)(\s+ROUNDED)?",
+            upper_text,
+        )
         if subtract_match:
             target = self._parse_operand(subtract_match.group(2))
             operation = {
                 "type": "SUBTRACT",
                 "value": subtract_match.group(1).strip(),
                 "target": target["name"],
+                "rounded": subtract_match.group(3) is not None,
             }
             if target["subscript"]:
                 operation["target_subscript"] = target["subscript"]
             if target["is_array_element"]:
                 operation["target_is_array_element"] = True
+            refs = self._arith_symbol_refs(subtract_match.group(1).strip(), symbol_names)
+            if target["name"] in (symbol_names or set()):
+                refs = sorted(set(refs + [target["name"]]))
+            if refs:
+                operation["references"] = refs
             if paragraph:
                 operation["paragraph"] = paragraph
             return operation
 
         # --- ADD ---
-        add_match = re.match(r"^ADD\s+(.+?)\s+TO\s+([A-Z0-9-]+(?:\([^)]+\))?)\.?$", upper_text)
+        add_match = re.match(
+            r"^ADD\s+(.+?)\s+TO\s+([A-Z0-9-]+(?:\([^)]+\))?)(\s+ROUNDED)?",
+            upper_text,
+        )
         if add_match:
             target = self._parse_operand(add_match.group(2))
             operation = {
                 "type": "ADD",
                 "value": add_match.group(1).strip(),
                 "target": target["name"],
+                "rounded": add_match.group(3) is not None,
             }
             if target["subscript"]:
                 operation["target_subscript"] = target["subscript"]
             if target["is_array_element"]:
                 operation["target_is_array_element"] = True
+            refs = self._arith_symbol_refs(add_match.group(1).strip(), symbol_names)
+            if target["name"] in (symbol_names or set()):
+                refs = sorted(set(refs + [target["name"]]))
+            if refs:
+                operation["references"] = refs
             if paragraph:
                 operation["paragraph"] = paragraph
             return operation
@@ -1201,9 +1429,13 @@ class ParserLayer:
         display_match = re.match(r"^DISPLAY\s+(.+?)\.?$", upper_text)
         if display_match:
             raw_value = display_match.group(1).strip()
+            # Only treat identifiers as references if they appear outside quoted literals
+            unquoted = re.sub(r"'[^']*'", " ", raw_value)
+            unquoted = re.sub(r'"[^"]*"', " ", unquoted)
+            for_ref_scan = unquoted
             refs = set()
             # Extract plain variables and subscript arrays/indices (REQ-8)
-            for m in re.finditer(r"([A-Z][A-Z0-9-]*)(?:\(([^)]+)\))?", raw_value):
+            for m in re.finditer(r"([A-Z][A-Z0-9-]*)(?:\(([^)]+)\))?", for_ref_scan):
                 base_name = m.group(1)
                 subscript = m.group(2)
                 if base_name not in self.RESERVED_WORDS and base_name not in self.FIGURATIVE_CONSTANTS:
@@ -1237,13 +1469,36 @@ class ParserLayer:
         file_bindings = {}
         external_calls = set()
 
+        pending_select_name: str | None = None
+        select_assign_1l = re.compile(
+            r"^SELECT\s+([A-Z0-9-]+)\s+ASSIGN(?:\s+TO)?\s+('[^']+'|\"[^\"]+\"|[A-Z0-9-]+)"
+        )
+        select_name_only = re.compile(r"^SELECT\s+([A-Z0-9-]+)\s*$")
+        assign_clause = re.compile(r"^ASSIGN(?:\s+TO)?\s+('[^']+'|\"[^\"]+\"|[A-Z0-9-]+)")
+
         for index, line in enumerate(lines):
-            upper = line["upper"]
+            upper = str(line["upper"]).strip()
+
+            if pending_select_name:
+                am = assign_clause.match(upper)
+                if am:
+                    target = am.group(1)
+                    if len(target) >= 2 and target[0] in {"'", '"'} and target[-1] == target[0]:
+                        target = target[1:-1]
+                    files.add(pending_select_name)
+                    file_bindings[pending_select_name] = target
+                    pending_select_name = None
+                elif re.match(
+                    r"^(ORGANIZATION|ACCESS|RECORD|FILE|SELECT|FD)\b",
+                    upper,
+                ):
+                    pending_select_name = None
+
             copy_match = re.match(r"^COPY\s+([A-Z0-9-]+)", upper)
             if copy_match:
                 copybooks.add(copy_match.group(1))
 
-            select_match = re.search(r"^SELECT\s+([A-Z0-9-]+)\s+ASSIGN(?:\s+TO)?\s+('[^']+'|\"[^\"]+\"|[A-Z0-9-]+)", upper)
+            select_match = select_assign_1l.match(upper)
             if select_match:
                 f_name = select_match.group(1)
                 files.add(f_name)
@@ -1252,6 +1507,11 @@ class ParserLayer:
                 if len(target) >= 2 and target[0] in {"'", '"'} and target[-1] == target[0]:
                     target = target[1:-1]
                 file_bindings[f_name] = target
+                pending_select_name = None
+            else:
+                son = select_name_only.match(upper)
+                if son:
+                    pending_select_name = son.group(1)
 
             fd_match = re.match(r"^FD\s+([A-Z0-9-]+)\.?$", upper)
             if fd_match:
@@ -1281,8 +1541,14 @@ class ParserLayer:
         control_flow: Dict[str, List[Dict[str, object]]],
         dependencies: Dict[str, List[object]],
         lines: List[Dict[str, object]],
+        operations: Optional[List[Dict[str, object]]] = None,
     ) -> List[str]:
         flags = set()
+
+        if operations:
+            arith = {"COMPUTE", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE"}
+            if any(op.get("type") in arith for op in operations):
+                flags.add("arithmetic_expression")
 
         if control_flow["branches"]:
             flags.add("conditional_logic")
@@ -1323,12 +1589,22 @@ class ParserLayer:
 
         return sorted(flags)
 
+    @staticmethod
+    def _is_variable_like_paragraph_name(name: str) -> bool:
+        """Names that look like WS / account / employee data items — not procedure paragraphs."""
+
+        u = str(name).strip().upper()
+        if u.startswith("WS-") or u.startswith("ACCT-") or u.startswith("EMP-"):
+            return True
+        return False
+
     def _extract_warnings(
         self,
         lines: List[Dict[str, object]],
         symbol_table: List[Dict[str, object]],
         control_flow: Dict[str, List[Dict[str, object]]],
         operations: List[Dict[str, object]],
+        known_paragraphs: List[str],
     ) -> List[Dict[str, object]]:
         warnings: List[Dict[str, object]] = []
         seen: set = set()
@@ -1392,26 +1668,18 @@ class ParserLayer:
                      f"Variable {sym['name']} is written but never read — possible dead assignment",
                      symbol=sym["name"])
 
-        # --- W004: Dead paragraph ---
+        # --- W004: Dead paragraph (only for real paragraph names from parser index) ---
         called_targets = set()
         for call in control_flow.get("calls", []):
             called_targets.add(str(call.get("to", call.get("target", ""))))
         for goto in control_flow.get("gotos", []):
             called_targets.add(str(goto.get("to_paragraph", "")))
-        paragraphs_in_source = []
-        in_proc = False
-        for line in lines:
-            if line["upper"] == "PROCEDURE DIVISION.":
-                in_proc = True
-                continue
-            if in_proc and line["upper"].endswith(".") and not line["upper"].endswith("SECTION."):
-                token = line["upper"][:-1].strip()
-                if token and " " not in token and token not in self.RESERVED_WORDS:
-                    paragraphs_in_source.append(token)
-        if paragraphs_in_source:
-            entry_para = paragraphs_in_source[0]
-            for para in paragraphs_in_source[1:]:
+        plist = [str(p).strip() for p in (known_paragraphs or []) if str(p).strip()]
+        if plist:
+            for para in plist[1:]:
                 if para not in called_targets:
+                    if self._is_variable_like_paragraph_name(para):
+                        continue
                     _add("W004", "high",
                          f"Paragraph {para} is never called — possible dead code",
                          paragraph=para)
@@ -1463,6 +1731,8 @@ class ParserLayer:
         duplicate_names = set()
         for declaration in declarations:
             name = declaration["name"]
+            if name in self.UNREFERENCEABLE_NAMES:
+                continue
             if name in seen_names:
                 duplicate_names.add(name)
             seen_names.add(name)
@@ -1520,10 +1790,31 @@ class ParserLayer:
 
     def _collect_selected_files(self, lines: List[Dict[str, object]]) -> set[str]:
         files = set()
+        pending: str | None = None
+        select_assign_1l = re.compile(
+            r"^SELECT\s+([A-Z0-9-]+)\s+ASSIGN(?:\s+TO)?\s+('[^']+'|\"[^\"]+\"|[A-Z0-9-]+)"
+        )
+        select_name_only = re.compile(r"^SELECT\s+([A-Z0-9-]+)\s*$")
+        assign_clause = re.compile(r"^ASSIGN(?:\s+TO)?\s+('[^']+'|\"[^\"]+\"|[A-Z0-9-]+)")
         for line in lines:
-            match = re.match(r"^SELECT\s+([A-Z0-9-]+)\s+ASSIGN\b", line["upper"])
-            if match:
-                files.add(match.group(1))
+            upper = str(line["upper"]).strip()
+            if pending:
+                if assign_clause.match(upper):
+                    files.add(pending)
+                    pending = None
+                elif re.match(
+                    r"^(ORGANIZATION|ACCESS|RECORD|FILE|SELECT|FD)\b",
+                    upper,
+                ):
+                    pending = None
+            m1 = select_assign_1l.match(upper)
+            if m1:
+                files.add(m1.group(1))
+                pending = None
+            else:
+                son = select_name_only.match(upper)
+                if son:
+                    pending = son.group(1)
         return files
 
     def _collect_fd_files(self, lines: List[Dict[str, object]]) -> set[str]:

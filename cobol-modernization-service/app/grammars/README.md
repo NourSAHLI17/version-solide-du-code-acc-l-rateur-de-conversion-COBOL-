@@ -1,45 +1,42 @@
 # ANTLR Grammar Integration
 
-This folder is the reserved location for grammar-based parser assets.
+This folder holds grammar assets for the optional ANTLR-backed parser (`PARSER_BACKEND=antlr`).
 
-The current `Cobol85Lexer.g4` and `Cobol85Parser.g4` files are placeholders.
-They exist to lock in file naming, folder layout, and generation commands.
-They are not complete COBOL grammars and should not be treated as production parsers.
+## Layout (grammars-v4 cobol85)
 
-## Intended Layout
+Upstream ships COBOL85 as a **combined** grammar plus preprocessor:
 
 ```text
-app/grammars/
-  cobol85/
-    Cobol85Lexer.g4
-    Cobol85Parser.g4
+app/grammars/cobol85/
+  Cobol85.g4                  ← combined lexer + parser (from antlr/grammars-v4)
+  Cobol85Preprocessor.g4      ← COPY / REPLACE preprocessor grammar (optional second pass)
 ```
 
-## Generation Workflow
+Stub split files (`Cobol85Lexer.g4` / `Cobol85Parser.g4` only) are **not** used; generation targets `Cobol85.g4`.
 
-Once real COBOL grammar files replace the placeholders, generate parser artifacts with a command like:
+## Generate Python artifacts
+
+From `cobol-modernization-service/` (requires Java and the ANTLR tool):
 
 ```bash
-antlr4 -Dlanguage=Python3 -visitor -o app/parsers/generated app/grammars/cobol85/Cobol85Lexer.g4 app/grammars/cobol85/Cobol85Parser.g4
+# Using antlr4 on PATH (pip install antlr4-tools), if your environment resolves the jar:
+antlr4 -Dlanguage=Python3 -visitor -listener -o app/parsers/generated app/grammars/cobol85/Cobol85.g4
 ```
 
-Or with the jar directly:
+Or with the official jar (pinned example):
 
 ```bash
-java -jar antlr-4.13.2-complete.jar -Dlanguage=Python3 -visitor -o app/parsers/generated app/grammars/cobol85/Cobol85Lexer.g4 app/grammars/cobol85/Cobol85Parser.g4
+java -jar tools/antlr-4.13.1-complete.jar -Dlanguage=Python3 -visitor -listener -o app/parsers/generated app/grammars/cobol85/Cobol85.g4
 ```
 
-## Runtime Requirements
+Generated outputs include `Cobol85Lexer.py`, `Cobol85Parser.py`, `Cobol85Visitor.py`, `Cobol85Listener.py`, plus `.tokens` / `.interp` helpers.
 
-- Python ANTLR runtime
-- generated lexer/parser files under `app/parsers/generated/`
-- parser visitor or listener adapter that converts parse trees into the project JSON contract
-- real COBOL grammar content replacing the placeholder `.g4` files
+## Runtime requirements
 
-## Migration Path
+- Python package `antlr4-python3-runtime`
+- Generated files under `app/parsers/generated/`
+- `parse_tree_adapter.py` translating parse trees into the project parser JSON contract (still required for a complete ANTLR path)
 
-1. Keep `PARSER_BACKEND=heuristic` as the stable default.
-2. Replace the placeholder grammar files under `app/grammars/cobol85/` with real COBOL grammars.
-3. Generate parser artifacts into `app/parsers/generated/`.
-4. Implement parse-tree to JSON mapping in `app/parsers/generated/parse_tree_adapter.py`.
-5. Switch `PARSER_BACKEND=antlr` in development and compare outputs against the heuristic parser tests.
+## Vendor copy
+
+A snapshot of the upstream `.g4` files also lives at repo root: `grammars_v4_master/cobol85/` (from `grammars-v4-master.zip`).

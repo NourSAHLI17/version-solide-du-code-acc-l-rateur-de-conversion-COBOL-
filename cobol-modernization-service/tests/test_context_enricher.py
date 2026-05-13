@@ -57,7 +57,7 @@ class TestContextEnricher:
             ]
         }
         
-        mappings = enricher._map_files(ast, jcl_manifest)
+        mappings, _warnings = enricher._map_files(ast, jcl_manifest)
         
         assert mappings["INVENTORY-FILE"]["physical_dataset"] == "PROD.INV.MASTER"
         assert mappings["INVENTORY-FILE"]["disposition"] == "SHR"

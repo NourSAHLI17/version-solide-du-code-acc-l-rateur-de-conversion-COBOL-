@@ -15,8 +15,8 @@ cobol-modernization-service/
     grammars/
       README.md
       cobol85/
-        Cobol85Lexer.g4
-        Cobol85Parser.g4
+        Cobol85.g4
+        Cobol85Preprocessor.g4
     api/
       routes/
       schemas/

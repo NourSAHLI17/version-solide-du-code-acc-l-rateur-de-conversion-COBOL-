@@ -1,9 +1,38 @@
 """Semantic analysis agent for COBOL modernization."""
 
+import copy
+import hashlib
+import json
+import logging
+import os
 import re
-from typing import Dict, List, Set, Optional
+from typing import Any, Dict, List, Set, Optional, Tuple
 
+from app.agents.analysis_prompt import ANALYSIS_AGENT_SYSTEM_PROMPT
+from app.agents.conversion_agent import ConversionAgent
+from app.core.config import load_config
+from app.services.chunker import chunk_segment
+from app.services.pipeline_segmenter import Segment, segment_program
 from app.services.segmenter import CobolSegmenter
+
+# v2.1 - prompt braces escaped
+print("[ANALYSIS_AGENT] module loaded v2")
+
+_LOG = logging.getLogger(__name__)
+
+# Optional in-process memo for analysis JSON (off by default). See ANALYZE logs / env vars below.
+_analysis_response_memo: Dict[str, Dict[str, object]] = {}
+
+# Set ANALYSIS_OVERLAY_DEBUG=0 (or false/off/no) to silence chunk/overlay diagnostics.
+def _analysis_overlay_debug_enabled() -> bool:
+    v = os.environ.get("ANALYSIS_OVERLAY_DEBUG", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+# Uniform analysis API contract — integer revisions (FIX 1).
+ANALYSIS_REVISION_HALTED: int = 0
+ANALYSIS_REVISION_DETERMINISTIC: int = 1
+ANALYSIS_REVISION_LLM: int = 2
 
 
 class AnalysisAgent:
@@ -18,8 +47,38 @@ class AnalysisAgent:
             {"global_purpose": "...", "complexity": "low", ...}
     """
 
-    def __init__(self, segmenter: CobolSegmenter | None = None):
+    def __init__(
+        self,
+        segmenter: CobolSegmenter | None = None,
+        conversion_agent: ConversionAgent | None = None,
+    ):
         self.segmenter = segmenter or CobolSegmenter()
+        # Shared with conversion so analysis uses the same LLM provider, model, and HTTP paths.
+        self._conversion = conversion_agent or ConversionAgent()
+
+    @staticmethod
+    def _analysis_memo_cache_key(source_code: str, program_name: Optional[str]) -> str:
+        digest = hashlib.sha256(source_code.encode("utf-8", errors="replace")).hexdigest()
+        return f"{program_name or '__none__'}:{digest}"
+
+    def _finish_analysis_store_memo(
+        self,
+        memo_enabled: bool,
+        memo_key: str,
+        result: Dict[str, object],
+    ) -> Dict[str, object]:
+        """Store successful analysis in opt-in server memo (revision 0 = halted, do not store)."""
+
+        if memo_enabled and int(result.get("analysis_revision") or 0) > 0:
+            _analysis_response_memo[memo_key] = copy.deepcopy(result)
+        return result
+
+    @staticmethod
+    def _extract_paragraph_sources(source_code: str, paragraph_names: List[str]) -> Dict[str, List[str]]:
+        """Column-aware paragraph bodies (fixed-format comments / continuations)."""
+        from app.parsers.column_aware_paragraphs import extract_paragraph_bodies
+
+        return extract_paragraph_bodies(source_code, paragraph_names)
 
     def analyze(self, source_code: str, parser_output: dict) -> Dict[str, object]:
         """
@@ -38,6 +97,57 @@ class AnalysisAgent:
             Output:
                 {"program_name": None, "global_purpose": "...", "complexity": "low", ...}
         """
+        if isinstance(parser_output, str):
+            try:
+                parser_output = json.loads(parser_output)
+            except json.JSONDecodeError:
+                parser_output = {}
+        if not isinstance(parser_output, dict):
+            parser_output = {}
+
+        src_hash8 = hashlib.sha256(source_code.encode("utf-8", errors="replace")).hexdigest()[:8]
+        program_name_early = parser_output.get("program_name")
+        memo_pn: Optional[str] = str(program_name_early) if program_name_early else None
+        memo_key = self._analysis_memo_cache_key(source_code, memo_pn)
+        memo_enabled = os.environ.get("ANALYSIS_ENABLE_ANALYSIS_CACHE", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        force_refresh = os.environ.get("ANALYSIS_FORCE_REFRESH", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        cfg = load_config()
+        eng_cfg = str(cfg.analysis_engine).strip().lower()
+        if eng_cfg not in {"llm", "deterministic"}:
+            eng_cfg = "llm"
+        eng_env_raw = os.environ.get("ANALYSIS_ENGINE")
+
+        cache_hit = False
+        if memo_enabled:
+            if force_refresh and memo_key in _analysis_response_memo:
+                del _analysis_response_memo[memo_key]
+            elif not force_refresh and memo_key in _analysis_response_memo:
+                cache_hit = True
+                cached = copy.deepcopy(_analysis_response_memo[memo_key])
+                print(f"[ANALYZE] cache_hit=True program={program_name_early!r}")
+                print(
+                    f"[ANALYZE] engine={cached.get('analysis_engine')!r} source_hash={src_hash8} "
+                    f"engine_env={eng_env_raw!r} (server memo hit; set ANALYSIS_FORCE_REFRESH=1 to bypass)",
+                )
+                return cached
+        print(f"[ANALYZE] cache_hit={cache_hit} program={program_name_early!r}")
+        print(
+            f"[ANALYZE] engine={eng_cfg!r} source_hash={src_hash8} "
+            f"engine_env={eng_env_raw!r} server_memo_enabled={memo_enabled} force_refresh={force_refresh}",
+        )
+        print(
+            "[ANALYZE] hint: no default server analysis cache unless ANALYSIS_ENABLE_ANALYSIS_CACHE=1; "
+            "dashboard localStorage key cobol-modernization-workspace; pipeline may skip re-analyze when "
+            "analysis_output is supplied in the request.",
+        )
+        print(
+            f"[ANALYSIS DEBUG] engine={eng_cfg} "
+            f"can_invoke={self._conversion.can_invoke_llm()}",
+        )
 
         dependencies = parser_output.get(
             "dependencies",
@@ -76,13 +186,74 @@ class AnalysisAgent:
                 },
                 "assumptions": [],
                 "warnings": warnings + preflight_errors,
+                "paragraph_source_extraction": "n/a",
+                "analysis_engine": "n/a",
+                "analysis_revision": ANALYSIS_REVISION_HALTED,
             }
+
+        parser_risk_flags = list(parser_output.get("risk_flags") or [])
+        _LOG.debug(
+            "analysis input parser program=%s backend=%s risk_flags=%s",
+            parser_output.get("program_name"),
+            parser_output.get("parser_backend"),
+            parser_risk_flags,
+        )
+
+        configured_engine = eng_cfg
+        use_column_aware = bool(
+            getattr(cfg, "analysis_use_column_paragraph_sources", False)
+            or configured_engine == "llm",
+        )
+        paragraph_source_extraction: str = "column_aware" if use_column_aware else "heuristic_split"
 
         segments = self.segmenter.segment(source_code, parser_output)["segments"]
         paragraphs = list(parser_output.get("paragraphs", []))
+
+        if use_column_aware:
+            bodies = self._extract_paragraph_sources(source_code, paragraphs)
+            for seg in segments:
+                pn = str(seg.get("paragraph_name"))
+                if pn in bodies and bodies[pn]:
+                    seg["paragraph_source_lines"] = bodies[pn]
+
         control_flow = parser_output.get("control_flow", {"branches": [], "loops": [], "calls": [], "gotos": []})
         symbol_table = list(parser_output.get("symbol_table", []))
         operations = list(parser_output.get("operations", []))
+
+        if configured_engine == "llm" and self._conversion.can_invoke_llm():
+            llm_pack = self._analyze_segments_with_llm(
+                source_code,
+                parser_output,
+                segments,
+                paragraphs,
+                control_flow,
+                symbol_table,
+                operations,
+            )
+            if llm_pack is not None:
+                llm_rows, llm_global_purpose = llm_pack
+                w_llm = list(warnings)
+                w_llm.append("analysis_pipeline: llm_via_segment_manifest_and_chunker")
+                out = self._aggregate(
+                    parser_output,
+                    llm_rows,
+                    w_llm,
+                    operations,
+                    symbol_table,
+                    analysis_engine="llm",
+                    analysis_revision=ANALYSIS_REVISION_LLM,
+                    paragraph_source_extraction=paragraph_source_extraction,
+                    llm_global_purpose=llm_global_purpose,
+                )
+                return self._finish_analysis_store_memo(memo_enabled, memo_key, out)
+            _LOG.warning(
+                "Analysis LLM path yielded no usable chunk responses (empty invoke, non-JSON, or "
+                "no matching paragraph names); falling back to deterministic aggregation. "
+                "provider=%s can_invoke_llm was True.",
+                self._conversion.provider,
+            )
+            warnings = list(warnings)
+            warnings.append("analysis_fallback: deterministic (llm unreachable or unusable response)")
 
         per_paragraph_analyses = [
             self._analyze_segment(
@@ -90,7 +261,451 @@ class AnalysisAgent:
             )
             for segment in segments
         ]
-        return self._aggregate(parser_output, per_paragraph_analyses, warnings, operations, symbol_table)
+        out = self._aggregate(
+            parser_output,
+            per_paragraph_analyses,
+            warnings,
+            operations,
+            symbol_table,
+            analysis_engine="deterministic",
+            analysis_revision=ANALYSIS_REVISION_DETERMINISTIC,
+            paragraph_source_extraction=paragraph_source_extraction,
+        )
+        return self._finish_analysis_store_memo(memo_enabled, memo_key, out)
+
+    # ─── LLM path (segment manifest + chunker + shared ConversionAgent client) ─
+
+    def _build_global_purpose_prompt(self) -> str:
+        """Single-turn JSON for whole-program summary (does not compete with section payloads)."""
+
+        return (
+            "Given these COBOL procedure paragraph names (in order):\n"
+            "{paragraph_names}\n\n"
+            "and this COBOL source excerpt from the program:\n"
+            "{cobol_source_excerpt}\n\n"
+            "### Parser JSON (structure reference)\n{parser_json}\n\n"
+            "Describe in one sentence what this program does as a whole. "
+            "Ground the answer only in the excerpt and names above — no generic placeholder text.\n"
+            'Return STRICT JSON only (no markdown): {{"global_purpose": "your sentence here"}}\n'
+        )
+
+    def _parse_llm_global_purpose_only(self, raw: str) -> Optional[str]:
+        cleaned = raw.strip()
+        if not cleaned:
+            return None
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+            cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+        gp = data.get("global_purpose")
+        if isinstance(gp, str) and gp.strip():
+            return gp.strip()
+        return None
+
+    def _infer_global_purpose_llm(
+        self,
+        source_code: str,
+        parser_output: Dict[str, object],
+        ordered: List[str],
+        para_ui: Dict[str, Dict[str, object]],
+    ) -> Optional[str]:
+        """Dedicated LLM call: only global_purpose JSON (runs before chunk analysis)."""
+
+        if not ordered or not self._conversion.can_invoke_llm():
+            return None
+        excerpt_lines: List[str] = []
+        for pname in ordered:
+            ui = para_ui.get(pname, {})
+            block = ui.get("paragraph_source_lines") or ui.get("source_lines") or []
+            excerpt_lines.extend(str(x) for x in block)
+        cobol_excerpt = "\n".join(excerpt_lines).strip()
+        if not cobol_excerpt:
+            bodies = self._extract_paragraph_sources(source_code, ordered)
+            for pname in ordered:
+                cobol_excerpt += "\n".join(bodies.get(pname, [])) + "\n"
+        cobol_excerpt = cobol_excerpt.strip()
+        if not cobol_excerpt:
+            return None
+        parser_slice = self._parser_subset_for_paragraphs(parser_output, ordered)
+        rendered = self._conversion.invoke_prompt(
+            self._build_global_purpose_prompt(),
+            {
+                "paragraph_names": ", ".join(ordered),
+                "cobol_source_excerpt": cobol_excerpt[:120000],
+                "parser_json": json.dumps(parser_slice, indent=2, sort_keys=True, default=str),
+            },
+            max_output_tokens=512,
+            system_prompt=ANALYSIS_AGENT_SYSTEM_PROMPT,
+        ).strip()
+        return self._parse_llm_global_purpose_only(rendered) if rendered else None
+
+    def _build_analysis_chunk_prompt(self) -> str:
+        """Chunk prompt: sections only (global_purpose is a separate LLM call)."""
+
+        response_json_shape = (
+            '{{"sections":[\n'
+            '  {{"name":"PARAGRAPH-NAME","role":"concise prose","business_rules":["..."],'
+            '"risk_flags":["snake_case token"],"warnings":[]}}\n'
+            "]}}"
+        )
+        return (
+            "You are the Analysis Agent in a COBOL modernization toolchain.\n"
+            "Infer semantic roles and business-level rules grounded ONLY in the COBOL excerpt and parser JSON.\n"
+            "Rules:\n"
+            "- Do not attribute STOP RUN, GOBACK, or EXIT PROGRAM to a paragraph unless those tokens appear "
+            "for that paragraph in the excerpt.\n"
+            "- Prefer concrete data and control-flow facts reflected in parser JSON.\n\n"
+            "Paragraphs covered in this request (paragraph_list): {paragraph_list}\n\n"
+            "Respond with STRICT JSON ONLY (no markdown fences). Shape:\n"
+            + response_json_shape
+            + "\n\n### COBOL excerpt\n{cobol_source_excerpt}\n\n"
+            "### Parser JSON (structure from hybrid/heuristic analyzer)\n{parser_json}\n\n"
+            "You MUST return exactly one JSON object per paragraph in paragraph_list. The response must contain a "
+            "'sections' array with exactly {n} entries (one per paragraph listed above).\n"
+            "Each entry must have a 'name' field matching exactly one of: {paragraph_names}.\n"
+            "Do not omit any paragraph. If you have nothing specific to say about a paragraph, still return an "
+            "entry with your best analysis.\n\n"
+            "For each paragraph, the business_rules array must include:\n"
+            "- Any balance threshold checks (e.g. overdraft, minimum balance, capacity limits)\n"
+            "- Any account type restrictions (e.g. savings-only)\n"
+            "- Any status guard checks (e.g. frozen account, active flag)\n"
+            "- Any rate or tax brackets with their exact thresholds\n"
+            "- Any confirmation or irreversibility rules\n"
+            "If none apply, use an empty array for business_rules.\n\n"
+            "Return ONLY valid JSON. The sections array MUST contain exactly {n} objects, one per paragraph in the "
+            "list above. Do not truncate. Do not omit any paragraph.\n"
+        )
+
+    def _parser_subset_for_paragraphs(
+        self,
+        parser_output: Dict[str, object],
+        paragraph_names: List[str],
+    ) -> Dict[str, object]:
+        ps = set(paragraph_names)
+        cf = parser_output.get("control_flow") or {}
+        if not isinstance(cf, dict):
+            cf = {}
+        return {
+            "program_name": parser_output.get("program_name"),
+            "paragraphs": [p for p in (parser_output.get("paragraphs") or []) if p in ps],
+            "operations": [o for o in (parser_output.get("operations") or []) if o.get("paragraph") in ps],
+            "control_flow": {
+                "calls": [
+                    c for c in (cf.get("calls") or [])
+                    if c.get("from") in ps or c.get("to") in ps or c.get("target") in ps
+                ],
+                "branches": [
+                    b for b in (cf.get("branches") or [])
+                    if str(b.get("paragraph") or "") in ps
+                ],
+                "loops": [l for l in (cf.get("loops") or []) if l.get("paragraph") in ps],
+                "gotos": [
+                    g for g in (cf.get("gotos") or [])
+                    if str(g.get("from_paragraph", "")) in ps or str(g.get("to_paragraph", "")) in ps
+                ],
+            },
+            "symbol_table": list(parser_output.get("symbol_table") or []),
+            "dependencies": dict(parser_output.get("dependencies") or {}),
+            "grammar_metadata": parser_output.get("grammar_metadata"),
+            "parser_backend": parser_output.get("parser_backend"),
+        }
+
+    @staticmethod
+    def _parse_llm_analysis_chunk_response(raw: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+        """Parse LLM chunk JSON: sections list and optional top-level global_purpose."""
+
+        cleaned = raw.strip()
+        if not cleaned:
+            return None, None
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+            cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None, None
+        gp: Optional[str] = None
+        raw_gp = data.get("global_purpose")
+        if isinstance(raw_gp, str) and raw_gp.strip():
+            gp = raw_gp.strip()
+        rows = data.get("sections")
+        if not isinstance(rows, list):
+            rows = data.get("paragraph_analyses")
+        if not isinstance(rows, list):
+            return None, gp
+        out: List[Dict[str, Any]] = []
+        for item in rows:
+            if isinstance(item, dict):
+                out.append(item)
+        if not out:
+            return None, gp
+        return out, gp
+
+    @staticmethod
+    def _parse_llm_analysis_json(raw: str) -> Optional[List[Dict[str, Any]]]:
+        rows, _gp = AnalysisAgent._parse_llm_analysis_chunk_response(raw)
+        return rows
+
+    @staticmethod
+    def _sanitize_llm_risk_flag(token: str) -> bool:
+        """Keep only snake_case tokens; drop hyphenated names the model invents as risk flags."""
+
+        t = str(token).strip().lower()
+        if not t or len(t) > 64:
+            return False
+        if "-" in t:
+            return False
+        return bool(re.fullmatch(r"[a-z][a-z0-9_]*", t))
+
+    def _analyze_segments_with_llm(
+        self,
+        source_code: str,
+        parser_output: Dict[str, object],
+        ui_segments: List[Dict[str, object]],
+        paragraphs: List[str],
+        control_flow: Dict[str, object],
+        symbol_table: List[Dict[str, object]],
+        operations: List[Dict[str, object]],
+    ) -> Optional[Tuple[List[Dict[str, object]], Optional[str]]]:
+        """
+        LLM analyses follow the conversion segment manifest and chunk boundaries:
+        manifest groups paragraphs, :func:`chunk_segment` narrows payloads, aggregation stays downstream.
+        """
+
+        para_ui: Dict[str, Dict[str, object]] = {str(s["paragraph_name"]): s for s in ui_segments}
+        ordered = paragraphs if paragraphs else list(para_ui.keys())
+        if not ordered:
+            return None
+
+        manifest = segment_program(parser_output, {})
+        collected: Dict[str, Dict[str, object]] = {}
+        any_chunk_ok = False
+        llm_global_purpose: Optional[str] = self._infer_global_purpose_llm(
+            source_code, parser_output, ordered, para_ui,
+        )
+        print(f"[GP DEBUG] raw global_purpose from chunk 0 = {llm_global_purpose!r}")
+        print(f"[GP DEBUG] llm_global_purpose after assign = {llm_global_purpose!r}")
+        chunk_ord = 0
+        _od = _analysis_overlay_debug_enabled()
+
+        for seg_dict in manifest.get("segments") or []:
+            if seg_dict.get("id") == "SEG_DATA":
+                continue
+            plist_seg = list(seg_dict.get("paragraphs") or [])
+            if not plist_seg:
+                continue
+            seg = Segment(
+                id=str(seg_dict["id"]),
+                paragraphs=plist_seg,
+                reads=set(seg_dict.get("reads") or []),
+                writes=set(seg_dict.get("writes") or []),
+                calls=list(seg_dict.get("calls") or []),
+                called_by=list(seg_dict.get("called_by") or []),
+                business_rules=list(seg_dict.get("business_rules") or []),
+                complexity=str(seg_dict.get("complexity", "low")),
+                requires_chunking=bool(seg_dict.get("requires_chunking", False)),
+            )
+            for ch in chunk_segment(seg, parser_output):
+                plist = list(ch.paragraphs)
+                if not plist:
+                    continue
+                chunk_idx = chunk_ord
+                chunk_ord += 1
+                excerpt_lines: List[str] = []
+                for pname in plist:
+                    ui = para_ui.get(pname, {})
+                    block = ui.get("paragraph_source_lines") or ui.get("source_lines") or []
+                    excerpt_lines.extend(str(x) for x in block)
+                cobol_excerpt = "\n".join(excerpt_lines).strip()
+                if not cobol_excerpt:
+                    bodies = self._extract_paragraph_sources(source_code, plist)
+                    for pname in plist:
+                        cobol_excerpt += "\n".join(bodies.get(pname, [])) + "\n"
+                cobol_excerpt = cobol_excerpt.strip()
+                plist_joined = ", ".join(plist)
+                print(f"[CHUNK DEBUG] chunk {chunk_idx}: paragraphs={plist_joined}")
+                if not cobol_excerpt:
+                    print(
+                        f"[CHUNK RESULT] chunk {chunk_idx}: "
+                        f"requested={len(plist)} returned=0 overlaid=0",
+                    )
+                    continue
+
+                parser_slice = self._parser_subset_for_paragraphs(parser_output, plist)
+                chunk_template = self._build_analysis_chunk_prompt()
+                rendered = self._conversion.invoke_prompt(
+                    chunk_template,
+                    {
+                        "cobol_source_excerpt": cobol_excerpt[:120000],
+                        "parser_json": json.dumps(parser_slice, indent=2, sort_keys=True, default=str),
+                        "paragraph_list": plist_joined,
+                        "paragraph_names": plist_joined,
+                        "n": str(len(plist)),
+                    },
+                    max_output_tokens=8192,
+                    system_prompt=ANALYSIS_AGENT_SYSTEM_PROMPT,
+                ).strip()
+
+                if not rendered:
+                    _LOG.warning(
+                        "LLM analysis chunk invoke returned empty body paragraphs=%s provider=%s",
+                        plist,
+                        self._conversion.provider,
+                    )
+                    print(
+                        f"[CHUNK RESULT] chunk {chunk_idx}: "
+                        f"requested={len(plist)} returned=0 overlaid=0",
+                    )
+                    continue
+
+                parsed, _chunk_gp_unused = self._parse_llm_analysis_chunk_response(rendered)
+
+                parsed_ok = parsed is not None
+                sections = list(parsed) if parsed else []
+                if _od:
+                    print(f"[OVERLAY DEBUG] chunk parsed ok={parsed_ok}")
+                    print(f"[OVERLAY DEBUG] chunk sections count={len(sections)}")
+                    fraw = (
+                        sections[0].get("role")
+                        if sections and isinstance(sections[0], dict)
+                        else "EMPTY"
+                    )
+                    print(f"[OVERLAY DEBUG] first role={fraw!r}")
+                if parsed is None:
+                    _LOG.warning(
+                        "LLM analysis chunk response not valid JSON paragraphs=%s head=%r",
+                        plist,
+                        rendered[:200],
+                    )
+                    print(
+                        f"[CHUNK RESULT] chunk {chunk_idx}: "
+                        f"requested={len(plist)} returned=0 overlaid=0",
+                    )
+                    continue
+
+                if len(sections) != len(plist):
+                    _LOG.warning(
+                        "LLM chunk row count mismatch paragraphs=%s expected=%s got=%s",
+                        plist,
+                        len(plist),
+                        len(sections),
+                    )
+
+                any_chunk_ok = True
+                updated_this_chunk: Set[str] = set()
+                for row in parsed:
+                    name = str(row.get("name") or "").strip().upper().rstrip(".")
+                    if not name or name not in plist:
+                        continue
+                    ui = para_ui.get(name, {"paragraph_name": name, "source_lines": [], "paragraph_source_lines": []})
+                    base = self._analyze_segment(
+                        ui, parser_output, ordered, control_flow, symbol_table, operations,
+                    )
+                    role_txt = row.get("role")
+                    if isinstance(role_txt, str) and role_txt.strip():
+                        base["role"] = role_txt.strip()
+                    brules = row.get("business_rules")
+                    if isinstance(brules, list) and brules:
+                        merged_rules = list(base.get("business_rules") or [])
+                        merged_rules.extend(str(x) for x in brules if str(x).strip())
+                        base["business_rules"] = self._dedupe(merged_rules)
+                    rflags = row.get("risk_flags")
+                    if isinstance(rflags, list) and rflags:
+                        rf = list(base.get("risk_flags") or [])
+                        rf.extend(
+                            str(x) for x in rflags
+                            if str(x).strip() and self._sanitize_llm_risk_flag(str(x))
+                        )
+                        base["risk_flags"] = self._dedupe(rf)
+                    swarn = row.get("warnings")
+                    if isinstance(swarn, list) and swarn:
+                        wcombine = list(base.get("warnings") or [])
+                        wcombine.extend(str(x) for x in swarn if str(x).strip())
+                        base["warnings"] = self._dedupe(wcombine)
+                    collected[name] = base
+                    updated_this_chunk.add(name)
+
+                for pname in plist:
+                    if pname in updated_this_chunk:
+                        role_full = str(collected[pname].get("role", ""))
+                        snippet = role_full[:60] + ("…" if len(role_full) > 60 else "")
+                        if _od:
+                            print(f"[CHUNK OK] {pname} role={snippet}")
+                    else:
+                        print(f"[CHUNK WARN] {pname} using deterministic fallback")
+                        _LOG.warning(
+                            "LLM omitted paragraph %s — using deterministic scaffold chunk=%s",
+                            pname,
+                            plist,
+                        )
+
+                if _od:
+                    _first_after: str = "EMPTY"
+                    for _pn in plist:
+                        if _pn in collected:
+                            _first_after = str(collected[_pn].get("role", "EMPTY"))
+                            break
+                    print(
+                        f"[OVERLAY DEBUG] after overlay role[0]={_first_after!r} "
+                        "(first paragraph in chunk plist)",
+                    )
+
+                print(
+                    f"[CHUNK RESULT] chunk {chunk_idx}: "
+                    f"requested={len(plist)} returned={len(sections)} overlaid={len(updated_this_chunk)}",
+                )
+
+        if not any_chunk_ok:
+            return None
+
+        merged_list: List[Dict[str, object]] = []
+        for pname in ordered:
+            if pname in collected:
+                merged_list.append(collected[pname])
+            elif pname in para_ui:
+                merged_list.append(
+                    self._analyze_segment(
+                        para_ui[pname],
+                        parser_output,
+                        ordered,
+                        control_flow,
+                        symbol_table,
+                        operations,
+                    ),
+                )
+            else:
+                stub: Dict[str, object] = {
+                    "paragraph_name": pname,
+                    "source_lines": [],
+                    "paragraph_source_lines": [],
+                    "symbol_reads": [],
+                    "symbol_writes": [],
+                    "has_file_io": False,
+                    "has_loop": False,
+                    "has_branch": False,
+                    "has_goto": False,
+                }
+                merged_list.append(
+                    self._analyze_segment(
+                        stub,
+                        parser_output,
+                        ordered,
+                        control_flow,
+                        symbol_table,
+                        operations,
+                    ),
+                )
+
+        if merged_list and _od:
+            print(
+                f"[OVERLAY DEBUG] after full merge first ordered role={merged_list[0].get('role')!r} "
+                f"name={merged_list[0].get('name')!r}",
+            )
+
+        return (merged_list, llm_global_purpose) if merged_list else None
 
     # ─── Segment-Level Analysis ──────────────────────────────────────────
 
@@ -119,7 +734,9 @@ class AnalysisAgent:
         """
 
         name = str(segment["paragraph_name"])
-        source_lines = [str(line) for line in segment.get("source_lines", [])]
+        scoped = segment.get("paragraph_source_lines")
+        raw_lines = scoped if scoped is not None else segment.get("source_lines", [])
+        source_lines = [str(line) for line in raw_lines]
         source_text = "\n".join(source_lines).upper()
         inputs = list(segment.get("symbol_reads", []))
         outputs = list(segment.get("symbol_writes", []))
@@ -174,7 +791,7 @@ class AnalysisAgent:
                 para_ops, calls_to_targets, symbol_table, control_flow,
             )
 
-        business_rules = self._extract_segment_rules(source_text, name, parser_output, para_ops, symbol_table)
+        business_rules: List[str] = []
         risk_flags = self._extract_segment_risks(source_text, has_file_io, has_loop, has_goto)
         segment_warnings = self._extract_segment_warnings(source_text)
 
@@ -414,16 +1031,21 @@ class AnalysisAgent:
                     "approve transaction and reduce balance otherwise",
                 ])
 
-        if "PERFORM VARYING" in source_text and "ADD" in source_text and "TOTAL" in source_text:
+        if "PERFORM VARYING" in source_text and "ADD" in source_text and re.search(
+            r"\bADD\s+.+\s+TO\s+[A-Z0-9-]*TOTAL", source_text
+        ):
             pattern = (
                 r"PERFORM VARYING\s+([A-Z0-9-]+)\s+FROM\s+(\d+)\s+BY\s+\d+\s+"
                 r"UNTIL\s+\1\s*>\s*(\d+)"
             )
             match = re.search(pattern, source_text)
             if match:
-                rules.append(f"sum values from {match.group(2)} to {match.group(3)} into TOTAL")
+                rules.append(
+                    f"within PERFORM VARYING of index {match.group(1)}, "
+                    f"accumulate ADD targets across iterations (bounded by FROM {match.group(2)} / UNTIL)"
+                )
             else:
-                rules.append("repeat processing over a bounded iteration range")
+                rules.append("repeat ADD accumulation over a bounded PERFORM VARYING range")
 
         if "INVALID KEY" in source_text and ("WRITE" in source_text or "REWRITE" in source_text):
             rules.append("guard file update operations with INVALID KEY handling")
@@ -537,10 +1159,24 @@ class AnalysisAgent:
         parser_warnings: List[object],
         operations: List[Dict[str, object]] = None,
         symbol_table: List[Dict[str, object]] = None,
+        *,
+        analysis_engine: str = "deterministic",
+        analysis_revision: int = ANALYSIS_REVISION_DETERMINISTIC,
+        paragraph_source_extraction: str = "heuristic_split",
+        llm_global_purpose: Optional[str] = None,
     ) -> Dict[str, object]:
         """
         Combine paragraph-scoped analyses into a single program-level analysis.
         """
+        _od = _analysis_overlay_debug_enabled()
+        if _od:
+            print(f"[AGGREGATE DEBUG] input sections count={len(per_paragraph_analyses)}")
+            _agg_first = (
+                per_paragraph_analyses[0].get("role")
+                if per_paragraph_analyses
+                else "EMPTY"
+            )
+            print(f"[AGGREGATE DEBUG] first role={_agg_first!r}")
         if operations is None:
             operations = list(parser_output.get("operations", []))
         if symbol_table is None:
@@ -549,6 +1185,8 @@ class AnalysisAgent:
         all_business_rules: List[str] = []
         all_risk_flags = set()
         all_warnings = set()
+        for rf in parser_output.get("risk_flags") or []:
+            all_risk_flags.add(str(rf))
         # Collect string warnings from parser (may be structured dicts)
         for w in parser_warnings:
             if isinstance(w, dict):
@@ -597,6 +1235,10 @@ class AnalysisAgent:
             branch_count,
         )
         global_purpose = self._infer_global_purpose(parser_output, per_paragraph_analyses)
+        print(f"[GP DEBUG] llm_global_purpose received = {llm_global_purpose!r}")
+        if isinstance(llm_global_purpose, str) and llm_global_purpose.strip():
+            global_purpose = llm_global_purpose.strip()
+        print(f"[GP DEBUG] final global_purpose = {global_purpose!r}")
         risk_points = self._map_risk_points(all_risk_flags, dependencies)
         conversion_guidance = self._build_conversion_guidance(
             complexity,
@@ -702,7 +1344,7 @@ class AnalysisAgent:
             "shared_state": sorted(shared_state),
         }
 
-        return {
+        result: Dict[str, object] = {
             "program_name": parser_output.get("program_name"),
             "global_purpose": global_purpose,
             "complexity": complexity,
@@ -723,7 +1365,14 @@ class AnalysisAgent:
             "data_flow_summary": data_flow_summary,
             "assumptions": [],
             "warnings": sorted(all_warnings),
+            "paragraph_source_extraction": paragraph_source_extraction,
+            "analysis_engine": analysis_engine,
+            "analysis_revision": analysis_revision,
         }
+        _final_r0 = result["sections"][0]["role"] if result.get("sections") else "EMPTY"
+        if _od:
+            print(f"[AGGREGATE DEBUG] final role[0]={_final_r0!r}")
+        return result
 
     def _build_complexity_drivers(
         self,
@@ -760,13 +1409,19 @@ class AnalysisAgent:
         if self._is_inventory_program(per_paragraph_analyses):
             return "manage inventory records through keyed file operations and user-driven menu actions"
         if self._looks_like_balance_decision(per_paragraph_analyses):
-            if any("VIP" in " ".join(section["business_rules"]) for section in per_paragraph_analyses):
+            if any("business_exception" in (section.get("risk_flags") or []) for section in per_paragraph_analyses):
                 return "approve or reject a transaction based on balance and VIP status"
             return "validate a transaction based on available balance and update the result status"
+        if self._looks_like_payroll_program(parser_output, per_paragraph_analyses):
+            return (
+                "calculate employee payroll including gross pay, bracketed tax withholding, "
+                "and net pay while maintaining roster state"
+            )
         if any(section.get("has_loop") for section in per_paragraph_analyses) and any(
-            "sum values" in " ".join(section.get("business_rules", [])) for section in per_paragraph_analyses
+            "accumulate ADD targets" in " ".join(section.get("business_rules", []))
+            for section in per_paragraph_analyses
         ):
-            return "compute an accumulated total by iterating over a bounded range"
+            return "accumulate totals by iterating over table slots with bounded PERFORM VARYING"
         if dependencies.get("copybooks") and dependencies.get("external_calls"):
             return "invoke an external rate calculation process using copied customer record structures"
         if dependencies.get("files"):
@@ -836,10 +1491,33 @@ class AnalysisAgent:
         return any(token in source_text for token in {"STOP RUN", "GOBACK", "EXIT PROGRAM"})
 
     def _looks_like_balance_decision(self, per_paragraph_analyses: List[Dict[str, object]]) -> bool:
-        all_rules = " ".join(
-            " ".join(section.get("business_rules", [])) for section in per_paragraph_analyses
+        blob = " ".join(
+            " ".join(str(x) for x in (section.get("inputs") or []))
+            + " "
+            + " ".join(str(x) for x in (section.get("outputs") or []))
+            + " "
+            + " ".join(str(x) for x in (section.get("business_rules") or []))
+            for section in per_paragraph_analyses
         ).upper()
-        return "BALANCE" in all_rules or "TRANSACTION" in all_rules
+        if "BALANCE" in blob and "AMOUNT" in blob:
+            return True
+        return any(
+            "financial_rule" in (section.get("risk_flags") or []) for section in per_paragraph_analyses
+        )
+
+    def _looks_like_payroll_program(
+        self,
+        parser_output: Dict[str, object],
+        per_paragraph_analyses: List[Dict[str, object]],
+    ) -> bool:
+        pname = str(parser_output.get("program_name") or "").upper()
+        if "PAYROLL" in pname:
+            return True
+        names = " ".join(str(section.get("name", "")) for section in per_paragraph_analyses).upper()
+        if any(k in names for k in ("CALCULATE-PAY", "DETERMINE-TAX", "NET-PAY", "GROSS-PAY")):
+            return True
+        syms = " ".join(str(s.get("name", "")) for s in parser_output.get("symbol_table", [])).upper()
+        return "WS-GROSS-PAY" in syms and "WS-NET-PAY" in syms
 
     def _is_inventory_program(self, per_paragraph_analyses: List[Dict[str, object]]) -> bool:
         names = " ".join(section.get("name", "") for section in per_paragraph_analyses).upper()

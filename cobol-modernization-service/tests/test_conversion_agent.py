@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -10,8 +11,16 @@ from app.parsers.cobol_parser import ParserLayer
 
 class ConversionAgentTests(unittest.TestCase):
     def setUp(self):
+        self._prev_analysis_engine = os.environ.get("ANALYSIS_ENGINE")
+        os.environ["ANALYSIS_ENGINE"] = "deterministic"
         self.parser = ParserLayer()
         self.agents = ModernizationAgents()
+
+    def tearDown(self):
+        if self._prev_analysis_engine is None:
+            os.environ.pop("ANALYSIS_ENGINE", None)
+        else:
+            os.environ["ANALYSIS_ENGINE"] = self._prev_analysis_engine
 
     def test_convert_returns_stub_when_llm_unavailable(self):
         original_llm = self.agents.llm

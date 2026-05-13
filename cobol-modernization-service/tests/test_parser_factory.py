@@ -1,3 +1,4 @@
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -19,12 +20,19 @@ class ParserFactoryTests(unittest.TestCase):
         parser = create_parser(AppConfig(parser_backend="antlr"))
         self.assertIsInstance(parser, AntlrCobolParser)
 
-    def test_antlr_parser_raises_clear_scaffold_error(self):
+    @unittest.skipUnless(importlib.util.find_spec("antlr4"), "antlr4 runtime not installed")
+    def test_antlr_parser_returns_dict_when_provisioned(self):
         parser = AntlrCobolParser()
-        with self.assertRaises(RuntimeError) as context:
-            parser.parse("PROCEDURE DIVISION.")
-
-        self.assertIn("ANTLR parser backend is scaffolded but not ready", str(context.exception))
+        if parser.missing_requirements():
+            self.skipTest("ANTLR generation incomplete")
+        src = """       IDENTIFICATION DIVISION.
+       PROGRAM-ID. TST.
+       PROCEDURE DIVISION.
+           STOP RUN.
+"""
+        out = parser.parse(src)
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out.get("parser_backend"), "antlr")
 
     def test_factory_rejects_unknown_backend(self):
         with self.assertRaises(ValueError):

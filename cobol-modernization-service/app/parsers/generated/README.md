@@ -8,11 +8,15 @@ Expected files after generation:
 app/parsers/generated/
   Cobol85Lexer.py
   Cobol85Parser.py
-  Cobol85ParserVisitor.py
+  Cobol85Visitor.py
+  Cobol85Listener.py
+  Cobol85*.tokens / Cobol85*.interp
   parse_tree_adapter.py
 ```
 
 Do not hand-edit generated lexer or parser files.
 
-The only project-owned file expected here is `parse_tree_adapter.py`, which
-should translate ANTLR parse trees into the backend parser JSON contract.
+The project-owned file `parse_tree_adapter.py` runs ANTLR for syntax validation,
+then delegates structured extraction to `ParserLayer` so the JSON contract matches
+the heuristic backend. Fields `parser_backend`, `antlr_syntax_ok`, and `antlr_errors`
+record grammar-level outcomes.

@@ -4,6 +4,7 @@ from app.core.config import AppConfig
 from app.parsers.antlr_parser import AntlrCobolParser
 from app.parsers.base import CobolParser
 from app.parsers.cobol_parser import ParserLayer
+from app.parsers.hybrid_parser import HybridCobolParser
 
 
 def create_parser(config: AppConfig) -> CobolParser:
@@ -28,5 +29,7 @@ def create_parser(config: AppConfig) -> CobolParser:
         return ParserLayer()
     if backend == "antlr":
         return AntlrCobolParser()
+    if backend == "hybrid":
+        return HybridCobolParser()
     raise ValueError(f"Unsupported parser backend: {config.parser_backend}")
 

@@ -35,11 +35,15 @@ export function parseCobol(sourceCode: string): Promise<ParserResult> {
 }
 
 export function analyzeCobol(sourceCode: string, parserOutput: ParserResult): Promise<AnalysisResult> {
+  const parserPayload =
+    parserOutput && typeof parserOutput === "object" && !Array.isArray(parserOutput)
+      ? parserOutput
+      : {};
   return request<AnalysisResult>("/analyze", {
     method: "POST",
     body: JSON.stringify({
       source_code: sourceCode,
-      parser_output: parserOutput,
+      parser_output: parserPayload,
     }),
   });
 }
@@ -105,23 +109,23 @@ export async function runPipelineMode(
 }
 
 export function runTests(
-  parserOutput: any,
-  analysisOutput: any,
+  parserOutput: Record<string, unknown>,
+  analysisOutput: Record<string, unknown>,
   javaSource: string,
-  cobolSource: string
-): Promise<any> {
-  return request("/test", {
+  cobolSource: string,
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/test", {
     method: "POST",
     body: JSON.stringify({
       parser_output: parserOutput,
       analysis_output: analysisOutput,
       java_source: javaSource,
-      cobol_source: cobolSource
+      cobol_source: cobolSource,
     }),
   });
 }
 
-export async function uploadProject(file: File): Promise<{ files: any[]; total: number }> {
+export async function uploadProject(file: File): Promise<{ files: Array<Record<string, unknown>>; total: number }> {
   const formData = new FormData();
   formData.append("file", file);
 
@@ -135,17 +139,20 @@ export async function uploadProject(file: File): Promise<{ files: any[]; total: 
     throw new Error(message || "Upload failed");
   }
 
-  return response.json();
+  return response.json() as Promise<{ files: Array<Record<string, unknown>>; total: number }>;
 }
 
-export function runProjectPipeline(files: any[], mode: string): Promise<{ results: any[]; total_files: number }> {
-  return request("/project/pipeline", {
+export function runProjectPipeline(
+  files: Array<Record<string, unknown>>,
+  mode: string,
+): Promise<{ results: Array<Record<string, unknown>>; total_files: number }> {
+  return request<{ results: Array<Record<string, unknown>>; total_files: number }>("/project/pipeline", {
     method: "POST",
     body: JSON.stringify({ files, mode }),
   });
 }
 
-export async function downloadProject(results: any[]): Promise<Blob> {
+export async function downloadProject(results: Array<Record<string, unknown>>): Promise<Blob> {
   const response = await fetch(`${API_ROOT}/download/project`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

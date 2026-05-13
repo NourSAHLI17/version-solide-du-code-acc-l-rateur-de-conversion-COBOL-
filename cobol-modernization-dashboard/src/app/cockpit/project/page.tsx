@@ -14,6 +14,8 @@ import type { PipelineMode } from "@/lib/pipelineModes";
 import { PROJECT_PIPELINE_MODES } from "@/lib/pipelineModes";
 import { useWorkspace } from "@/lib/workspace";
 
+import type { AnalysisResult, ParserResult } from "@/lib/types";
+
 interface ProjectFile {
     path: string;
     content: string;
@@ -24,6 +26,22 @@ interface ProjectFile {
     javaCode?: string;
 }
 
+type UploadRow = Record<string, unknown> & {
+    path?: string;
+    content?: string;
+    type?: string;
+    size?: number;
+};
+
+type ProjectPipelineResult = {
+    file?: string;
+    java_source?: string;
+    parser_output?: ParserResult | null;
+    analysis_output?: AnalysisResult | null;
+    errors?: string[];
+    test_report?: unknown;
+};
+
 export default function ProjectCockpitPage() {
     const { actions } = useWorkspace();
     const [projectName, setProjectName] = useState("MyCobolProject");
@@ -32,8 +50,10 @@ export default function ProjectCockpitPage() {
     const [isUploading, setIsUploading] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [mode, setMode] = useState<PipelineMode>("full");
-    const [projectResults, setProjectResults] = useState<any[]>([]);
-    const selectedResult = selectedFile ? projectResults.find((r: any) => r.file === selectedFile.path) : null;
+    const [projectResults, setProjectResults] = useState<ProjectPipelineResult[]>([]);
+    const selectedResult = selectedFile
+        ? projectResults.find((r) => r.file === selectedFile.path)
+        : undefined;
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files || e.target.files.length === 0) return;
@@ -53,9 +73,12 @@ export default function ProjectCockpitPage() {
         try {
             const res = await uploadProject(file);
             console.log("Upload result:", res);
-            const nextFiles = res.files.map((f: any) => ({
-                ...f,
-                status: "idle"
+            const nextFiles: ProjectFile[] = (res.files as UploadRow[]).map((f) => ({
+                path: String(f.path ?? ""),
+                content: String(f.content ?? ""),
+                type: (f.type === "cobol" || f.type === "copybook" || f.type === "jcl" || f.type === "other" ? f.type : "other") as ProjectFile["type"],
+                size: typeof f.size === "number" ? f.size : 0,
+                status: "idle" as const,
             }));
             setFiles(nextFiles);
             setSelectedFile(nextFiles[0] ?? null);
@@ -84,10 +107,11 @@ export default function ProjectCockpitPage() {
             }));
             
             const response = await runProjectPipeline(payloadFiles, mode);
-            setProjectResults(response.results);
-            actions.setProjectResults(response.results);
+            const results = response.results as ProjectPipelineResult[];
+            setProjectResults(results);
+            actions.setProjectResults(results);
 
-            const firstConverted = response.results.find((r: any) => r.java_source);
+            const firstConverted = results.find((r) => r.java_source);
             const firstSourceFile = firstConverted ? files.find((f) => f.path === firstConverted.file) : null;
             if (firstConverted && firstSourceFile) {
                 actions.setActiveArtifact(
@@ -100,13 +124,14 @@ export default function ProjectCockpitPage() {
             
             // Update local file status based on the results array
             setFiles(prev => prev.map(f => {
-                const res = response.results.find((r: any) => r.file === f.path);
+                const res = results.find((r) => r.file === f.path);
                 if (res) {
-                    const hasError = res.errors && res.errors.length > 0;
+                    const errList = res.errors;
+                    const hasError = Boolean(errList?.length);
                     return { 
                         ...f, 
                         status: hasError ? "failed" : "success", 
-                        error: hasError ? res.errors[0] : undefined, 
+                        error: hasError ? errList?.[0] : undefined, 
                         javaCode: res.java_source 
                     };
                 }
@@ -123,7 +148,7 @@ export default function ProjectCockpitPage() {
     const handleDownload = async () => {
         if (projectResults.length === 0) return;
         try {
-            const blob = await downloadProject(projectResults);
+            const blob = await downloadProject(projectResults as Array<Record<string, unknown>>);
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
@@ -259,7 +284,7 @@ export default function ProjectCockpitPage() {
                             </tr>
                         )}
                         {files.map((file, i) => {
-                            const rowResult = projectResults.find((r: any) => r.file === file.path);
+                            const rowResult = projectResults.find((r) => r.file === file.path);
                             return (
                             <tr key={i}>
                                 <td className="file-path" title={file.path}>

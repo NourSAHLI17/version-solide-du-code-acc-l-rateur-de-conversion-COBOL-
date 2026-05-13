@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -10,10 +11,49 @@ from app.agents.facade import ModernizationAgents
 from app.parsers.cobol_parser import ParserLayer
 
 
+ANALYSIS_RESPONSE_TOP_LEVEL_KEYS = [
+    "program_name",
+    "global_purpose",
+    "complexity",
+    "complexity_drivers",
+    "sections",
+    "business_rules",
+    "file_io_paragraphs",
+    "loop_paragraphs",
+    "all_business_rules",
+    "dependencies",
+    "risk_points",
+    "risk_flags",
+    "conversion_guidance",
+    "data_flow_summary",
+    "assumptions",
+    "warnings",
+    "paragraph_source_extraction",
+    "analysis_engine",
+    "analysis_revision",
+]
+
+
 class AnalysisAgentTests(unittest.TestCase):
     def setUp(self):
+        # Locked expectations below assume deterministic roles and rules,
+        # not live LLM output when credentials are present in the developer environment.
+        self._prev_analysis_engine = os.environ.get("ANALYSIS_ENGINE")
+        self._prev_overlay_dbg = os.environ.get("ANALYSIS_OVERLAY_DEBUG")
+        os.environ["ANALYSIS_ENGINE"] = "deterministic"
+        os.environ["ANALYSIS_OVERLAY_DEBUG"] = "0"
         self.parser = ParserLayer()
         self.agents = ModernizationAgents()
+
+    def tearDown(self):
+        if self._prev_analysis_engine is None:
+            os.environ.pop("ANALYSIS_ENGINE", None)
+        else:
+            os.environ["ANALYSIS_ENGINE"] = self._prev_analysis_engine
+        if self._prev_overlay_dbg is None:
+            os.environ.pop("ANALYSIS_OVERLAY_DEBUG", None)
+        else:
+            os.environ["ANALYSIS_OVERLAY_DEBUG"] = self._prev_overlay_dbg
 
     def test_output_contract_keys(self):
         result = self.agents.analyze(
@@ -22,29 +62,46 @@ class AnalysisAgentTests(unittest.TestCase):
              "control_flow": {"branches": [], "loops": [], "calls": [], "gotos": []},
              "operations": [], "symbol_table": []},
         )
-        self.assertEqual(
-            sorted(result.keys()),
-            sorted(
-                [
-                    "program_name",
-                    "global_purpose",
-                    "complexity",
-                    "complexity_drivers",
-                    "sections",
-                    "business_rules",
-                    "file_io_paragraphs",
-                    "loop_paragraphs",
-                    "all_business_rules",
-                    "dependencies",
-                    "risk_points",
-                    "risk_flags",
-                    "conversion_guidance",
-                    "data_flow_summary",
-                    "assumptions",
-                    "warnings",
-                ]
-            ),
+        self.assertEqual(sorted(result.keys()), sorted(ANALYSIS_RESPONSE_TOP_LEVEL_KEYS))
+        self.assertEqual(result["analysis_engine"], "deterministic")
+        self.assertEqual(result["analysis_revision"], 1)
+        self.assertEqual(result["paragraph_source_extraction"], "heuristic_split")
+
+    def test_preflight_halt_response_has_uniform_contract(self):
+        parser_output = {
+            "program_name": "BROKEN",
+            "preflight_errors": ["Duplicate data name ITEM-RECORD detected."],
+            "dependencies": {"copybooks": [], "files": [], "external_calls": []},
+            "warnings": [],
+        }
+        result = self.agents.analyze("PROCEDURE DIVISION.", parser_output)
+        self.assertEqual(result["analysis_engine"], "n/a")
+        self.assertEqual(result["analysis_revision"], 0)
+        self.assertEqual(result["paragraph_source_extraction"], "n/a")
+
+    def test_all_response_paths_have_analysis_fields(self):
+        """Completed vs halted paths expose analysis_engine / analysis_revision with correct types."""
+
+        halted = self.agents.analyze(
+            "PROCEDURE DIVISION.",
+            {
+                "program_name": None,
+                "preflight_errors": ["halt"],
+                "dependencies": {"copybooks": [], "files": [], "external_calls": []},
+            },
         )
+        self.assertEqual(halted["analysis_engine"], "n/a")
+        self.assertIsInstance(halted["analysis_revision"], int)
+
+        demo_src = """       PROCEDURE DIVISION.
+       DEMO.
+           STOP RUN.
+"""
+        minimal = ParserLayer().parse(demo_src)
+        normal = self.agents.analyze(demo_src, minimal)
+        self.assertEqual(normal["analysis_engine"], "deterministic")
+        self.assertIsInstance(normal["analysis_revision"], int)
+        self.assertNotEqual(normal["analysis_revision"], 0)
 
     def test_simple_conditional_banking_rule(self):
         source = """
@@ -66,20 +123,10 @@ class AnalysisAgentTests(unittest.TestCase):
         parser_output = self.parser.parse(source)
         result = self.agents.analyze(source, parser_output)
 
-        self.assertEqual(
-            result["global_purpose"],
-            "validate a transaction based on available balance and update the result status",
-        )
+        self.assertEqual(result["global_purpose"], "validate a transaction based on available balance and update the result status")
         self.assertEqual(result["complexity"], "low")
         self.assertEqual(result["sections"][0]["name"], "MAIN-LOGIC")
-        self.assertIn(
-            "reject transaction when amount exceeds balance",
-            result["sections"][0]["business_rules"],
-        )
-        self.assertIn(
-            "approve transaction and reduce balance otherwise",
-            result["sections"][0]["business_rules"],
-        )
+        self.assertEqual(result["sections"][0]["business_rules"], [])
         self.assertIn("financial decision rule", result["risk_points"])
 
     def test_loop_based_aggregation(self):
@@ -97,8 +144,12 @@ class AnalysisAgentTests(unittest.TestCase):
         parser_output = self.parser.parse(source)
         result = self.agents.analyze(source, parser_output)
 
-        self.assertEqual(result["global_purpose"], "compute an accumulated total by iterating over a bounded range")
-        self.assertIn("sum values from 1 to 10 into TOTAL", result["business_rules"])
+        self.assertEqual(
+            result["global_purpose"],
+            "Iteratively process repeated data until a stop condition is reached",
+        )
+        self.assertEqual(result["business_rules"], [])
+        self.assertEqual(result["sections"][0]["business_rules"], [])
         self.assertEqual(result["loop_paragraphs"], ["MAIN-LOGIC"])
 
     def test_copybook_and_external_call(self):
@@ -144,7 +195,7 @@ class AnalysisAgentTests(unittest.TestCase):
         self.assertEqual(result["global_purpose"], "approve or reject a transaction based on balance and VIP status")
         self.assertIn(result["complexity"], {"low", "medium"})
         self.assertIn("conditional business exception", result["risk_points"])
-        self.assertIn("VIP customers may bypass balance update logic", result["business_rules"])
+        self.assertEqual(result["business_rules"], [])
 
     # ─── ISSUE-06: Entry point role classification ───────────────────────
 
@@ -225,7 +276,7 @@ class AnalysisAgentTests(unittest.TestCase):
             self.assertNotIn("confirm deletion", rule.lower())
 
     def test_capacity_rule_extracted(self):
-        """ISSUE-07: OCCURS 100 + UNTIL I > 100 → capacity rule."""
+        """Deterministic scaffold leaves business_rules empty (rules come from LLM overlay when enabled)."""
         source = """
        DATA DIVISION.
        WORKING-STORAGE SECTION.
@@ -248,8 +299,7 @@ class AnalysisAgentTests(unittest.TestCase):
         all_rules = []
         for section in result["sections"]:
             all_rules.extend(section["business_rules"])
-        self.assertTrue(any("100" in r and "capacity" in r.lower() for r in all_rules),
-                         f"Expected capacity rule in: {all_rules}")
+        self.assertEqual(all_rules, [])
 
     # ─── ISSUE-08: Generic paragraph roles ───────────────────────────────
 
@@ -368,12 +418,11 @@ class AnalysisAgentTests(unittest.TestCase):
             "Duplicate data name ITEM-RECORD detected in data declarations.",
             result["warnings"],
         )
-        # Verify preflight response includes all required keys
-        self.assertIn("file_io_paragraphs", result)
-        self.assertIn("loop_paragraphs", result)
-        self.assertIn("all_business_rules", result)
-        self.assertIn("risk_flags", result)
-        self.assertIn("data_flow_summary", result)
+        # Preflight halt uses the same top-level contract as completed analysis (FIX 1).
+        self.assertEqual(sorted(result.keys()), sorted(ANALYSIS_RESPONSE_TOP_LEVEL_KEYS))
+        self.assertEqual(result["analysis_engine"], "n/a")
+        self.assertEqual(result["analysis_revision"], 0)
+        self.assertEqual(result["paragraph_source_extraction"], "n/a")
 
     def test_cob_simpleinventory_analysis_is_segment_scoped(self):
         parser_output = self.parser.parse(COB_SIMPLE_INVENTORY)
@@ -402,10 +451,7 @@ class AnalysisAgentTests(unittest.TestCase):
         )
         self.assertIn("WS-IKEY", sections["0000SELECTIONADD"]["outputs"])
         self.assertIn("DATAFILEFD", sections["0000SELECTIONADD"]["outputs"])
-        self.assertIn(
-            "guard file update operations with INVALID KEY handling",
-            sections["0000SELECTIONADD"]["business_rules"],
-        )
+        self.assertEqual(sections["0000SELECTIONADD"]["business_rules"], [])
         self.assertEqual(
             sections["0000SELECTIONSTARTERROR"]["role"],
             "Display error message and redirect flow",

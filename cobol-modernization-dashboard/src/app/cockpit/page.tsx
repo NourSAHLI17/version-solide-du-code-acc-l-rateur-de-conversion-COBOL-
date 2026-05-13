@@ -58,7 +58,7 @@ export default function CockpitPage() {
     actions.setLastError(null);
     try {
       await runStatus();
-      const parserResult = workspace.parserResult ?? (await parseCobol(workspace.sourceCode));
+      const parserResult = await parseCobol(workspace.sourceCode);
       actions.setParserResult(parserResult);
       const analysisResult = await analyzeCobol(workspace.sourceCode, parserResult);
       actions.setAnalysisResult(analysisResult);

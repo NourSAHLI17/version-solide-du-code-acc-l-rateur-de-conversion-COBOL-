@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
+import ClientChrome from "@/components/ClientChrome";
+
 export const metadata: Metadata = {
   title: "COBOL Modernization Dashboard",
   description: "Frontend cockpit for parser, analysis, conversion, and validation testing.",
@@ -13,7 +15,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <ClientChrome>{children}</ClientChrome>
+      </body>
     </html>
   );
 }

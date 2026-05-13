@@ -1,8 +1,9 @@
 """LLM-backed conversion agent for Java generation."""
 
 import json
+import logging
 import os
-from typing import Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from dotenv import load_dotenv
@@ -20,8 +21,15 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     except ImportError:  # pragma: no cover - optional runtime dependency
         ChatPromptTemplate = None
 
+try:
+    from langchain_core.messages import SystemMessage
+except ImportError:  # pragma: no cover - optional runtime dependency
+    SystemMessage = None
+
 
 load_dotenv()
+
+_LOG = logging.getLogger(__name__)
 
 
 class ConversionAgent:
@@ -61,6 +69,25 @@ class ConversionAgent:
             self.provider = "openrouter"
             self.model_name = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
             self.llm = object()
+
+        # Explicit LLM_PROVIDER can miss credentials for that vendor while another key is set.
+        # Align with "keys present => usable client" so analysis does not silently skip the LLM path.
+        if self.provider == "stub":
+            if ChatGoogleGenerativeAI and google_api_key:
+                self.llm = ChatGoogleGenerativeAI(
+                    model=self.model_name,
+                    temperature=0,
+                    google_api_key=google_api_key,
+                )
+                self.provider = "google"
+            elif openai_api_key:
+                self.provider = "openai"
+                self.model_name = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+                self.llm = object()
+            elif openrouter_api_key:
+                self.provider = "openrouter"
+                self.model_name = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+                self.llm = object()
 
     def convert(self, source_code: str, parser_output: dict, analysis_output: str) -> str:
         """
@@ -111,6 +138,189 @@ class ConversionAgent:
         chain = prompt | self.llm
         response = chain.invoke(prompt_input)
         return response.content
+
+    def invoke_prompt(
+        self,
+        template_body: str,
+        prompt_input: Dict[str, str],
+        *,
+        max_output_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """
+        Run a single-turn chat template using the same transports and auth as :meth:`convert`.
+
+        Returns an empty string when LangChain is unavailable or no LLM endpoint is configured;
+        callers must fall back to deterministic logic rather than inventing analysis text.
+        """
+
+        if not ChatPromptTemplate:
+            print("[ANALYSIS DEBUG] invoke_prompt: skipped, ChatPromptTemplate unavailable")
+            return ""
+        if system_prompt:
+            # ("system", str) is parsed as an f-string template; JSON examples with {"type": ...}
+            # then raise KeyError('"type"'). SystemMessage content is literal (not format-expanded).
+            if SystemMessage is not None:
+                prompt = ChatPromptTemplate.from_messages(
+                    [
+                        SystemMessage(content=system_prompt),
+                        ("human", template_body),
+                    ],
+                )
+            else:
+                prompt = ChatPromptTemplate.from_messages(
+                    [
+                        ("system", system_prompt),
+                        ("human", template_body),
+                    ],
+                )
+        else:
+            prompt = ChatPromptTemplate.from_template(template_body)
+        rendered = self._render_prompt_for_openrouter(prompt, prompt_input)
+        print(f"[ANALYSIS DEBUG] LLM called with prompt length={len(rendered)} provider={self.provider!r}")
+        if self.provider == "openai":
+            result = self._convert_with_openai(prompt, prompt_input, max_output_tokens=max_output_tokens)
+            print(f"[ANALYSIS DEBUG] LLM response length={len(result)}")
+            return result
+        if self.provider == "openrouter":
+            result = self._convert_with_openrouter(prompt, prompt_input, max_output_tokens=max_output_tokens)
+            print(f"[ANALYSIS DEBUG] LLM response length={len(result)}")
+            return result
+        if not self.llm:
+            print("[ANALYSIS DEBUG] invoke_prompt: skipped, no Google llm instance")
+            return ""
+        chain = prompt | self.llm
+        response = chain.invoke(prompt_input)
+        content = getattr(response, "content", None)
+        out = str(content) if content is not None else str(response)
+        print(f"[ANALYSIS DEBUG] LLM response length={len(out)}")
+        return out
+
+    @staticmethod
+    def _chat_api_messages(prompt: object, prompt_input: Dict[str, str]) -> List[Dict[str, str]]:
+        """Build OpenAI-compatible message list (system + user) from a ChatPromptTemplate."""
+
+        if not hasattr(prompt, "format_messages"):
+            return [{"role": "user", "content": str(prompt)}]
+        formatted: List[Any] = prompt.format_messages(**prompt_input)
+        out: List[Dict[str, str]] = []
+        for message in formatted:
+            mtype = getattr(message, "type", "") or ""
+            content = getattr(message, "content", "")
+            if isinstance(content, list):
+                content = "\n".join(
+                    str(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text"
+                )
+            text = str(content)
+            if mtype == "system":
+                out.append({"role": "system", "content": text})
+            elif mtype in ("human", "user"):
+                out.append({"role": "user", "content": text})
+            else:
+                out.append({"role": "user", "content": text})
+        return out if out else [{"role": "user", "content": ""}]
+
+    def can_invoke_llm(self) -> bool:
+        """True when a real model call is expected to succeed (keys / client present)."""
+
+        key_status = {
+            "GOOGLE_API_KEY": bool(os.getenv("GOOGLE_API_KEY")),
+            "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+            "OPENROUTER_API_KEY": bool(os.getenv("OPENROUTER_API_KEY")),
+        }
+        if not ChatPromptTemplate:
+            print(
+                "[ANALYSIS DEBUG] can_invoke_llm -> False branch=prompt_template_unavailable "
+                f"provider={self.provider!r} keys={key_status}",
+            )
+            _LOG.info(
+                "can_invoke_llm=False reason=prompt_template_unavailable provider=%s model=%s keys=%s",
+                self.provider,
+                self.model_name,
+                key_status,
+            )
+            return False
+        if self.provider == "google" and self.llm is not None:
+            print(
+                "[ANALYSIS DEBUG] can_invoke_llm -> True branch=google_langchain_client_ready "
+                f"keys={key_status}",
+            )
+            _LOG.info(
+                "can_invoke_llm=True reason=google_langchain_client_ready provider=%s model=%s keys=%s",
+                self.provider,
+                self.model_name,
+                key_status,
+            )
+            return True
+        if self.provider == "google" and self.llm is None:
+            print(
+                "[ANALYSIS DEBUG] can_invoke_llm -> False branch=google_but_no_llm_instance "
+                f"keys={key_status}",
+            )
+            _LOG.info(
+                "can_invoke_llm=False reason=google_selected_but_no_llm_instance provider=%s keys=%s",
+                self.provider,
+                key_status,
+            )
+            return False
+        if self.provider == "openai" and key_status["OPENAI_API_KEY"]:
+            print(
+                "[ANALYSIS DEBUG] can_invoke_llm -> True branch=openai_key_present "
+                f"keys={key_status}",
+            )
+            _LOG.info(
+                "can_invoke_llm=True reason=openai_http_transport_ok provider=%s model=%s keys=%s",
+                self.provider,
+                self.model_name,
+                key_status,
+            )
+            return True
+        if self.provider == "openai":
+            print(
+                "[ANALYSIS DEBUG] can_invoke_llm -> False branch=openai_provider_missing_OPENAI_API_KEY "
+                f"keys={key_status}",
+            )
+            _LOG.info(
+                "can_invoke_llm=False reason=openai_selected_but_missing_OPENAI_API_KEY provider=%s keys=%s",
+                self.provider,
+                key_status,
+            )
+            return False
+        if self.provider == "openrouter" and key_status["OPENROUTER_API_KEY"]:
+            print(
+                "[ANALYSIS DEBUG] can_invoke_llm -> True branch=openrouter_key_present "
+                f"keys={key_status}",
+            )
+            _LOG.info(
+                "can_invoke_llm=True reason=openrouter_http_transport_ok provider=%s model=%s keys=%s",
+                self.provider,
+                self.model_name,
+                key_status,
+            )
+            return True
+        if self.provider == "openrouter":
+            print(
+                "[ANALYSIS DEBUG] can_invoke_llm -> False branch=openrouter_missing_OPENROUTER_API_KEY "
+                f"keys={key_status}",
+            )
+            _LOG.info(
+                "can_invoke_llm=False reason=openrouter_selected_but_missing_OPENROUTER_API_KEY "
+                "provider=%s keys=%s",
+                self.provider,
+                key_status,
+            )
+            return False
+        print(
+            "[ANALYSIS DEBUG] can_invoke_llm -> False branch=stub_or_unknown_provider "
+            f"provider={self.provider!r} keys={key_status}",
+        )
+        _LOG.info(
+            "can_invoke_llm=False reason=stub_or_unknown_provider provider=%s model=%s keys=%s",
+            self.provider,
+            self.model_name,
+            key_status,
+        )
+        return False
 
     def get_runtime_status(self) -> Dict[str, object]:
         """
@@ -195,6 +405,9 @@ INPUTS:
 ### Conversion Configuration
 {conversion_config}
 
+### Rounding contract (COMPUTE targets)
+{rounding_contract}
+
 CONVERSION RULES:
 1. Preserve business behavior exactly as defined by the parser and analysis inputs.
    If Parser Output or Analysis Output is empty, use only the context that is present
@@ -225,15 +438,19 @@ QUALITY BAR:
 - traceable to source structure
 """
         )
+        rounding_contract = self._build_rounding_contract(parser_output)
         return prompt, {
             "source": source_code,
             "context_mode": context_mode,
             "parser_json": parser_json,
             "analysis_json": analysis_json,
             "conversion_config": json.dumps(config, indent=2, sort_keys=True),
+            "rounding_contract": rounding_contract,
         }
 
-    def _convert_with_openrouter(self, prompt: object, prompt_input: Dict[str, str]) -> str:
+    def _convert_with_openrouter(
+        self, prompt: object, prompt_input: Dict[str, str], *, max_output_tokens: Optional[int] = None,
+    ) -> str:
         """
         Invoke OpenRouter's OpenAI-compatible chat completions endpoint.
 
@@ -258,18 +475,20 @@ QUALITY BAR:
                 "// Provide GOOGLE_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY to enable Java generation.\n"
             )
 
-        rendered_prompt = self._render_prompt_for_openrouter(prompt, prompt_input)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "http://localhost"),
             "X-Title": os.getenv("OPENROUTER_APP_NAME", "cobol-modernization-service"),
         }
+        messages = self._chat_api_messages(prompt, prompt_input)
         payload = {
             "model": self.model_name,
-            "messages": [{"role": "user", "content": rendered_prompt}],
+            "messages": messages,
             "temperature": 0,
         }
+        if max_output_tokens is not None:
+            payload["max_tokens"] = max_output_tokens
 
         with httpx.Client(timeout=120.0) as client:
             response = client.post(self.openrouter_base_url, headers=headers, json=payload)
@@ -298,7 +517,9 @@ QUALITY BAR:
                 return "\n".join(parts)
         raise ValueError("OpenRouter response content format was not recognized.")
 
-    def _convert_with_openai(self, prompt: object, prompt_input: Dict[str, str]) -> str:
+    def _convert_with_openai(
+        self, prompt: object, prompt_input: Dict[str, str], *, max_output_tokens: Optional[int] = None,
+    ) -> str:
         """
         Invoke OpenAI's chat completions endpoint for Java conversion.
 
@@ -323,16 +544,18 @@ QUALITY BAR:
                 "// Provide GOOGLE_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY to enable Java generation.\n"
             )
 
-        rendered_prompt = self._render_prompt_for_openrouter(prompt, prompt_input)
+        messages = self._chat_api_messages(prompt, prompt_input)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         payload = {
             "model": self.model_name,
-            "messages": [{"role": "user", "content": rendered_prompt}],
+            "messages": messages,
             "temperature": 0,
         }
+        if max_output_tokens is not None:
+            payload["max_tokens"] = max_output_tokens
 
         with httpx.Client(timeout=120.0) as client:
             response = client.post(self.openai_base_url, headers=headers, json=payload)
@@ -385,6 +608,18 @@ QUALITY BAR:
         if hasattr(prompt, "format"):
             return str(prompt.format(**prompt_input))
         return str(prompt)
+
+    def _build_rounding_contract(self, parser_output: Dict[str, object]) -> str:
+        """Map each COMPUTE to a Java rounding mode (matches PAYROLL regression expectations)."""
+        parts: list[str] = []
+        for op in parser_output.get("operations") or []:
+            if op.get("type") != "COMPUTE":
+                continue
+            target = str(op.get("target", ""))
+            rounded = bool(op.get("rounded"))
+            mode = "RoundingMode.HALF_UP" if rounded else "RoundingMode.DOWN"
+            parts.append(f"{target}: {mode}")
+        return "; ".join(parts) if parts else ""
 
     def _normalize_analysis_output(self, analysis_output: str) -> Dict[str, object]:
         """

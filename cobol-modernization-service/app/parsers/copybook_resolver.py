@@ -162,12 +162,14 @@ def apply_replacing(content: str, pairs: list[tuple[str, str]]) -> str:
     """
 
     for old, new in pairs:
-        content = re.sub(
-            r"\b" + re.escape(old) + r"\b",
-            new,
-            content,
-            flags=re.IGNORECASE,
-        )
+        old_esc = re.escape(old)
+        # Tokens ending with '-' (COPY REPLACING ==PREFIX-==) need COBOL identifier boundaries.
+        # Plain tokens use \\b so INV still matches inside INV-NAME.
+        if old.endswith("-"):
+            pattern = r"(?<![A-Z0-9-])" + old_esc + r"(?![A-Z0-9-])"
+        else:
+            pattern = r"\b" + old_esc + r"\b"
+        content = re.sub(pattern, new, content, flags=re.IGNORECASE)
     return content
 
 

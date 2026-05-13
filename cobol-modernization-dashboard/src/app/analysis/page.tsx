@@ -23,7 +23,7 @@ export default function AnalysisPage() {
       const nextStatus = await refresh();
       setStatus(nextStatus);
       actions.setBackendStatus(nextStatus);
-      const parserResult = workspace.parserResult ?? (await parseCobol(workspace.sourceCode));
+      const parserResult = await parseCobol(workspace.sourceCode);
       actions.setParserResult(parserResult);
       const analysisResult = await analyzeCobol(workspace.sourceCode, parserResult);
       actions.setAnalysisResult(analysisResult);

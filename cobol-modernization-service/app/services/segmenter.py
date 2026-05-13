@@ -59,6 +59,7 @@ class CobolSegmenter:
                     "paragraph_name": "MAIN-LOGIC",
                     "cluster_paragraphs": ["MAIN-LOGIC"],
                     "source_lines": procedure_lines,
+                    "paragraph_source_lines": procedure_lines,
                     "symbol_reads": symbol_refs["reads"],
                     "symbol_writes": symbol_refs["writes"],
                     "has_file_io": has_file_io,
@@ -99,10 +100,12 @@ class CobolSegmenter:
             paragraph_branches = [b for b in control_flow.get("branches", []) if b.get("paragraph") == p_name]
             paragraph_loops = [l for l in control_flow.get("loops", []) if l.get("paragraph") == p_name]
 
+            para_only_lines = paragraph_to_lines.get(p_name, [])
             result_segments.append({
                 "paragraph_name": p_name,
                 "cluster_paragraphs": g_seg["paragraphs"],
                 "source_lines": combined_lines, # We give the full cluster source for context
+                "paragraph_source_lines": para_only_lines,
                 "symbol_reads": sorted(list(para_reads)),
                 "symbol_writes": sorted(list(para_writes)),
                 "cluster_reads": sorted(list(g_seg.get("reads", []))),

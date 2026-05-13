@@ -86,7 +86,7 @@ def test_chunking_layer_respects_boundaries(parser_mock):
     # Create a Segment dataclass from the dict for chunk_segment
     seg_large = Segment(
         id=seg_main_dict["id"],
-        paragraphs=["P1", "P2", "P3", "P4", "P5", "PARA2", "P7"],
+        paragraphs=["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "PARA2", "P10"],
         reads=set(seg_main_dict["reads"]),
         writes=set(seg_main_dict["writes"]),
         calls=seg_main_dict["calls"],
@@ -102,3 +102,29 @@ def test_chunking_layer_respects_boundaries(parser_mock):
     assert len(chunks) == 2
     assert "P5" in chunks[0].paragraphs
     assert "PARA2" in chunks[1].paragraphs
+
+
+def test_chunk_segment_splits_when_many_paragraphs_even_if_low_complexity():
+    """Analysis path: >10 paragraphs forces split (~8 per chunk) even without requires_chunking."""
+    paras = [f"P{i:02d}" for i in range(12)]
+    po = {
+        "program_name": "BIG",
+        "paragraphs": paras,
+        "symbol_table": [],
+        "control_flow": {"calls": [], "loops": [], "branches": [], "gotos": []},
+        "operations": [],
+    }
+    seg = Segment(
+        id="SEG_MAIN",
+        paragraphs=paras,
+        reads=set(),
+        writes=set(),
+        calls=[],
+        called_by=[],
+        business_rules=[],
+        complexity="low",
+        requires_chunking=False,
+    )
+    chunks = chunk_segment(seg, po)
+    assert len(chunks) >= 2
+    assert all(len(c.paragraphs) <= 10 for c in chunks)

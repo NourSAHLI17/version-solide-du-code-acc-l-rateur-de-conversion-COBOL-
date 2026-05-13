@@ -46,7 +46,7 @@ function SuiteCard({ label, tests, accent }: { label: string; tests: TestResult[
 
 export default function TestingPage() {
   const { workspace, hydrated } = useWorkspace();
-  const [report, setReport] = useState<any>(null);
+  const [report, setReport] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const latestProjectResult = useMemo(
@@ -62,7 +62,7 @@ export default function TestingPage() {
     if (!report) {
       return [];
     }
-    return SUITES.flatMap((suite) => report[suite.key] ?? []);
+    return SUITES.flatMap((suite) => (report[suite.key] as TestResult[] | undefined) ?? []);
   }, [report]);
 
   const executeTests = async () => {
@@ -119,7 +119,10 @@ export default function TestingPage() {
               />
             );
           })}
-          <StatusPill label={report.is_pipeline_green ? "Pipeline green" : "Pipeline failing"} tone={report.is_pipeline_green ? "good" : "bad"} />
+          <StatusPill
+            label={report["is_pipeline_green"] ? "Pipeline green" : "Pipeline failing"}
+            tone={report["is_pipeline_green"] ? "good" : "bad"}
+          />
         </div>
       )}
 
@@ -200,11 +203,13 @@ export default function TestingPage() {
 
       <div className="glass-card">
         <div className="panel-label" style={{ marginBottom: 12 }}>Behavioral Diff Viewer</div>
-        {(report?.behavioral_tests ?? []).length === 0 ? (
+        {(() => {
+          const behavioral = (report?.["behavioral_tests"] as TestResult[] | undefined) ?? [];
+          return behavioral.length === 0 ? (
           <p className="toolbar-copy">No behavioral diffs returned yet.</p>
         ) : (
           <div className="page-grid">
-            {(report.behavioral_tests as TestResult[]).map((test) => (
+            {behavioral.map((test) => (
               <div key={test.id} className="panel-card" style={{ borderColor: test.passed ? "rgba(52, 211, 153, 0.7)" : "rgba(239, 68, 68, 0.7)" }}>
                 <div className="health-row">
                   <strong style={{ color: "var(--amber)" }}>{test.description}</strong>
@@ -224,7 +229,8 @@ export default function TestingPage() {
               </div>
             ))}
           </div>
-        )}
+        );
+        })()}
       </div>
     </AppShell>
   );
