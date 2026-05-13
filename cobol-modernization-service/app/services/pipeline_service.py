@@ -1,7 +1,10 @@
 """Service orchestration for parser, analysis, conversion, and validation layers."""
 
+import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Dict, List
 
 from app.agents.facade import ModernizationAgents
@@ -22,6 +25,22 @@ from app.services.testing_agent import run_testing_agent
 from app.validation.service import ValidationService
 
 logger = logging.getLogger(__name__)
+
+
+def _analysis_result_to_json_str(analysis_result: Any) -> str:
+    """
+    Serialize analysis agent output for conversion.
+
+    AnalysisAgent.analyze returns a flat dict (no top-level "analysis" key).
+    Older callers sometimes wrapped JSON under "analysis" as a string or object.
+    """
+    if isinstance(analysis_result, dict) and "analysis" in analysis_result:
+        nested = analysis_result.get("analysis")
+        if isinstance(nested, str) and nested.strip():
+            return nested
+        if isinstance(nested, (dict, list)):
+            return json.dumps(nested, default=str)
+    return json.dumps(analysis_result, default=str)
 
 
 class PipelineService:
@@ -317,7 +336,7 @@ class PipelineService:
         # Stage 6: Analysis (if missing)
         if not analysis_output:
             analysis_result = self.analyze_cobol(source_code, parser_output)
-            analysis_output = analysis_result.get("analysis", "{}")
+            analysis_output = _analysis_result_to_json_str(analysis_result)
 
         # Stage 7: Conversion
         conv_resp = self.convert_cobol(source_code, parser_output, analysis_output)
@@ -366,7 +385,7 @@ class PipelineService:
 
         if needs_analysis and not analysis_output and parser_output:
             analysis_result = self.analyze_cobol(cobol_source, parser_output)
-            analysis_output = analysis_result.get("analysis", "{}")
+            analysis_output = _analysis_result_to_json_str(analysis_result)
             result["analysis_output"] = analysis_output
         elif analysis_output:
             result["analysis_output"] = analysis_output
@@ -391,6 +410,56 @@ class PipelineService:
     # Project Pipeline — Multi-file batch processing
     # ------------------------------------------------------------------
 
+    def _process_project_file(self, cob_file: dict, copybook_lib: dict, mode: str) -> dict[str, Any]:
+        """Run parse → analyze → convert (and optional tests) for one COBOL file."""
+        result: dict[str, Any] = {"file": cob_file["path"], "errors": []}
+        source = cob_file["content"]
+        try:
+            expanded = self._resolve_inline_copies(source, copybook_lib)
+
+            parser_out = self.parse_cobol(expanded)
+            result["parser_output"] = parser_out
+
+            analysis_out = self.analyze_cobol(expanded, parser_out)
+            result["analysis_output"] = analysis_out
+
+            analysis_str = _analysis_result_to_json_str(analysis_out)
+
+            conversion_parser = parser_out
+            conversion_analysis = analysis_str
+
+            if mode == "parse_only":
+                conversion_analysis = "{}"
+            elif mode == "analyse_only":
+                conversion_parser = {}
+            elif mode == "no_parse":
+                conversion_parser = {}
+                conversion_analysis = "{}"
+
+            if mode not in {"full", "parse_only", "parse_analyse", "analyse_only", "convert_only", "no_parse"}:
+                raise ValueError(f"Unsupported project pipeline mode: {mode}")
+
+            conv = self.convert_cobol(
+                expanded if mode != "no_parse" else source,
+                conversion_parser,
+                conversion_analysis,
+            )
+            result["java_source"] = conv.get("java_code", "")
+
+            if mode == "full" and result.get("java_source"):
+                test_report = run_testing_agent(
+                    result.get("parser_output", {}),
+                    result.get("analysis_output", {}),
+                    result["java_source"],
+                    source,
+                )
+                result["test_report"] = test_report
+
+        except Exception as e:
+            result["errors"].append(str(e))
+
+        return result
+
     def run_project_pipeline(
         self,
         files: List[dict],
@@ -404,69 +473,25 @@ class PipelineService:
         cobol_files = [f for f in files if f.get("type") == "cobol"]
         copybook_files = [f for f in files if f.get("type") == "copybook"]
 
-        # Build in-memory copybook library
-        from pathlib import Path
         copybook_lib = {
             Path(f["path"]).stem.upper(): f["content"]
             for f in copybook_files
         }
 
-        results = []
-        for cob_file in cobol_files:
-            result: dict[str, Any] = {"file": cob_file["path"], "errors": []}
-            source = cob_file["content"]
+        if not cobol_files:
+            return {"results": [], "total_files": 0}
 
-            try:
-                # 1. Inline COPY resolution
-                expanded = self._resolve_inline_copies(source, copybook_lib)
+        max_workers = min(3, len(cobol_files))
+        future_to_path: dict[Any, str] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for cob_file in cobol_files:
+                fut = executor.submit(self._process_project_file, cob_file, copybook_lib, mode)
+                future_to_path[fut] = cob_file["path"]
+            by_path: dict[str, dict[str, Any]] = {}
+            for fut in as_completed(future_to_path):
+                by_path[future_to_path[fut]] = fut.result()
 
-                parser_out = self.parse_cobol(expanded)
-                result["parser_output"] = parser_out
-
-                analysis_out = self.analyze_cobol(expanded, parser_out)
-                result["analysis_output"] = analysis_out
-
-                import json
-                analysis_str = (
-                    analysis_out.get("analysis", "{}")
-                    if isinstance(analysis_out, dict)
-                    else json.dumps(analysis_out)
-                )
-
-                conversion_parser = parser_out
-                conversion_analysis = analysis_str
-
-                if mode == "parse_only":
-                    conversion_analysis = "{}"
-                elif mode == "analyse_only":
-                    conversion_parser = {}
-                elif mode == "no_parse":
-                    conversion_parser = {}
-                    conversion_analysis = "{}"
-
-                if mode not in {"full", "parse_only", "parse_analyse", "analyse_only", "convert_only", "no_parse"}:
-                    raise ValueError(f"Unsupported project pipeline mode: {mode}")
-
-                conv = self.convert_cobol(
-                    expanded if mode != "no_parse" else source,
-                    conversion_parser,
-                    conversion_analysis,
-                )
-                result["java_source"] = conv.get("java_code", "")
-
-                if mode == "full" and result.get("java_source"):
-                    test_report = run_testing_agent(
-                        result.get("parser_output", {}),
-                        result.get("analysis_output", {}),
-                        result["java_source"],
-                        source,
-                    )
-                    result["test_report"] = test_report
-
-            except Exception as e:
-                result["errors"].append(str(e))
-
-            results.append(result)
+        results = [by_path[f["path"]] for f in cobol_files]
 
         return {"results": results, "total_files": len(cobol_files)}
 

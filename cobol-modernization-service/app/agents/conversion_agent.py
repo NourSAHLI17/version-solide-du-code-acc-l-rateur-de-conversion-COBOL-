@@ -108,36 +108,41 @@ class ConversionAgent:
                 "public class ..." or configuration stub text
         """
 
-        if self.provider == "openai":
+        file_name = str((parser_output or {}).get("program_name") or "unknown")
+        try:
+            if self.provider == "openai":
+                prompt, prompt_input = self.build_conversion_prompt_input(
+                    source_code,
+                    parser_output,
+                    analysis_output,
+                )
+                return self._convert_with_openai(prompt, prompt_input)
+
+            if self.provider == "openrouter":
+                prompt, prompt_input = self.build_conversion_prompt_input(
+                    source_code,
+                    parser_output,
+                    analysis_output,
+                )
+                return self._convert_with_openrouter(prompt, prompt_input)
+
+            if not self.llm or not ChatPromptTemplate:
+                return (
+                    "// Conversion agent is not configured.\n"
+                    "// Provide GOOGLE_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY to enable Java generation.\n"
+                )
+
             prompt, prompt_input = self.build_conversion_prompt_input(
                 source_code,
                 parser_output,
                 analysis_output,
             )
-            return self._convert_with_openai(prompt, prompt_input)
-
-        if self.provider == "openrouter":
-            prompt, prompt_input = self.build_conversion_prompt_input(
-                source_code,
-                parser_output,
-                analysis_output,
-            )
-            return self._convert_with_openrouter(prompt, prompt_input)
-
-        if not self.llm or not ChatPromptTemplate:
-            return (
-                "// Conversion agent is not configured.\n"
-                "// Provide GOOGLE_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY to enable Java generation.\n"
-            )
-
-        prompt, prompt_input = self.build_conversion_prompt_input(
-            source_code,
-            parser_output,
-            analysis_output,
-        )
-        chain = prompt | self.llm
-        response = chain.invoke(prompt_input)
-        return response.content
+            chain = prompt | self.llm
+            response = chain.invoke(prompt_input)
+            return response.content
+        except Exception as e:
+            print(f"CONVERSION ERROR file: {file_name} {e!s}")
+            raise
 
     def invoke_prompt(
         self,
