@@ -1,5 +1,7 @@
 # COBOL Modernization Project — Run Guide
 
+Compact operator reference. For full step-by-step setup (venv, env files, first test), see **[EXECUTION_GUIDE.md](./EXECUTION_GUIDE.md)**.
+
 How to run the platform locally for review or development.
 
 | Component | Folder | Default URL |

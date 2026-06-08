@@ -13,7 +13,8 @@ against GnuCOBOL execution, and surfaces results through a Next.js dashboard.
 ```
 cobol/
 ├── README.md                         ← this file
-├── RUN_GUIDE.md                      ← operator quickstart
+├── EXECUTION_GUIDE.md                ← step-by-step: install, configure, run, first test
+├── RUN_GUIDE.md                      ← compact operator reference
 ├── start_backend.bat                 ← launches cobol-modernization-service on port 8010
 ├── start_frontend.bat                ← launches cobol-modernization-dashboard
 ├── .vscode/
@@ -84,6 +85,8 @@ LLM analysis → Java conversion (whole-class or constrained) → compile/repair
 behavioral testing → download.
 
 ## Getting started
+
+**Full run instructions:** see [`EXECUTION_GUIDE.md`](EXECUTION_GUIDE.md) for numbered setup steps, env configuration, verification, and first pipeline test.
 
 ### Prerequisites
 
