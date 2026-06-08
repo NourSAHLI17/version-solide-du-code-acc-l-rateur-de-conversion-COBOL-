@@ -258,9 +258,10 @@ Main dashboard pages:
 | Document | Purpose |
 |---|---|
 | `README.md` | Project overview and architecture summary |
-| `docs/architecture/ARCHITECTURE_README.md` | Full system architecture (EY review) |
+| `docs/architecture/README.md` | Architecture index (EY review) |
+| `docs/architecture/01-system-overview.md` | Global system overview |
 | `RUN_GUIDE.md` | Compact operator reference (ports, curl commands) |
-| `docs/architecture/DEVELOPER_GUIDE.md` | Developer deep-dive |
+| `docs/architecture/reference/developer-guide.md` | Developer deep-dive |
 
 ---
 

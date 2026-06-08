@@ -1,46 +1,48 @@
 # COBOL modernization — documentation index
 
-## Architecture reference (EY review)
+## Architecture (EY review)
 
-Start with [`architecture/ARCHITECTURE_README.md`](./architecture/ARCHITECTURE_README.md) — it is the canonical index for all architecture docs.
+**Start here:** [`architecture/README.md`](./architecture/README.md)
 
-### System logic (`ARCH_*.md`)
+### Global view
 
-| Document | What it covers |
+| # | Document |
 |---|---|
-| [architecture/ARCH_00_SYSTEM_LOGIC.md](./architecture/ARCH_00_SYSTEM_LOGIC.md) | Full system picture |
-| [architecture/ARCH_01_BACKEND_PIPELINE_APPROACHES.md](./architecture/ARCH_01_BACKEND_PIPELINE_APPROACHES.md) | Pipeline modes and endpoint approaches |
-| [architecture/ARCH_02_PARSER_ANALYSIS_CONVERSION_LOGIC.md](./architecture/ARCH_02_PARSER_ANALYSIS_CONVERSION_LOGIC.md) | Parser, analysis, both conversion modes |
-| [architecture/ARCH_03_PROJECT_UPLOAD_AND_BATCH_FLOW.md](./architecture/ARCH_03_PROJECT_UPLOAD_AND_BATCH_FLOW.md) | ZIP upload, copybooks, batch processing |
-| [architecture/ARCH_04_TESTING_VALIDATION_AND_DOWNLOAD_LOGIC.md](./architecture/ARCH_04_TESTING_VALIDATION_AND_DOWNLOAD_LOGIC.md) | Testing, behavioral diff, validation |
-| [architecture/ARCH_05_FRONTEND_BACKEND_INTERACTION.md](./architecture/ARCH_05_FRONTEND_BACKEND_INTERACTION.md) | Frontend pages and API calls |
-| [architecture/ARCH_06_APPROACH_DECISIONS_AND_TRADEOFFS.md](./architecture/ARCH_06_APPROACH_DECISIONS_AND_TRADEOFFS.md) | Design decisions and tradeoffs |
+| 01 | [System overview](./architecture/01-system-overview.md) |
+| 02 | [Pipeline and data flow](./architecture/02-pipeline-and-data-flow.md) |
+| 03 | [Design decisions](./architecture/03-design-decisions.md) |
 
-### Source contracts and specs
+### Pipeline components (execution order)
 
-| Document | What it covers |
+| # | Document |
 |---|---|
-| [architecture/00_project_overview.md](./architecture/00_project_overview.md) | Routes, config defaults, orchestration |
-| [architecture/01_jcl_and_copy_resolver.md](./architecture/01_jcl_and_copy_resolver.md) | JCL parser and COPY resolver |
-| [architecture/02_cobol_parser.md](./architecture/02_cobol_parser.md) | COBOL parser output contract |
-| [architecture/03_segmenter_aggregator.md](./architecture/03_segmenter_aggregator.md) | Segmenter and aggregator |
-| [architecture/04_testing_agent.md](./architecture/04_testing_agent.md) | Testing agent report contract |
-| [architecture/05_analysis_conversion_download.md](./architecture/05_analysis_conversion_download.md) | Analysis, conversion, project, download APIs |
-| [architecture/PARSER_LAYER_SPECS.md](./architecture/PARSER_LAYER_SPECS.md) | Parser layer specification |
-| [architecture/SEGMENTER_LAYER_SPECS.md](./architecture/SEGMENTER_LAYER_SPECS.md) | Segmenter specification |
-| [architecture/ANALYSIS_AGENT_SPECS.md](./architecture/ANALYSIS_AGENT_SPECS.md) | Analysis agent specification |
-| [architecture/SCHEMA_CONTRACTS.md](./architecture/SCHEMA_CONTRACTS.md) | Cross-cutting schemas |
-| [architecture/DEVELOPER_GUIDE.md](./architecture/DEVELOPER_GUIDE.md) | Developer onboarding |
+| 04 | [JCL and COPY resolution](./architecture/04-jcl-and-copy-resolution.md) |
+| 05 | [COBOL parsing](./architecture/05-cobol-parsing.md) |
+| 06 | [Context enrichment and segmentation](./architecture/06-context-enrichment-and-segmentation.md) |
+| 07 | [Analysis agent](./architecture/07-analysis-agent.md) |
+| 08 | [Java conversion](./architecture/08-java-conversion.md) |
+| 09 | [Testing, validation, and download](./architecture/09-testing-validation-and-download.md) |
+| 10 | [Project batch upload](./architecture/10-project-batch-upload.md) |
+| 11 | [Frontend and API](./architecture/11-frontend-and-api.md) |
+
+### Reference
+
+| Document | Purpose |
+|---|---|
+| [API reference](./architecture/reference/api-reference.md) | Endpoints and request schemas |
+| [Schema contracts](./architecture/reference/schema-contracts.md) | JSON between stages |
+| [Developer guide](./architecture/reference/developer-guide.md) | Extending the engine |
+
+## How to run
+
+See [`../EXECUTION_GUIDE.md`](../EXECUTION_GUIDE.md) at the repository root.
 
 ## Code locations
 
 | Area | Path |
 |---|---|
-| Backend (active) | `cobol-modernization-service/app/` |
-| Hybrid parser | `cobol-modernization-service/app/parsers/hybrid_parser.py` |
-| Heuristic parser | `cobol-modernization-service/app/parsers/cobol_parser.py` |
-| Pipeline | `cobol-modernization-service/app/services/pipeline_service.py` |
-| Conversion modes | `cobol-modernization-service/app/agents/conversion_agent.py` |
-| Behavioral diff | `cobol-modernization-service/app/services/behavioral_diff_runner.py` |
+| Backend | `cobol-modernization-service/app/` |
+| Hybrid parser | `app/parsers/hybrid_parser.py` |
+| Pipeline | `app/services/pipeline_service.py` |
 | Frontend | `cobol-modernization-dashboard/src/` |
-| ACME test case | `acme-bank-v3/` |
+| Test case | `acme-bank-v3/` |

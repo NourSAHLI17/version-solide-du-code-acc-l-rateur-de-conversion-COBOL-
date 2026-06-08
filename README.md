@@ -20,15 +20,10 @@ cobol/
 ├── .vscode/
 │
 ├── docs/
-│   ├── architecture/                 ← production architecture reference (EY review)
-│   │   ├── ARCHITECTURE_README.md    ← start here: doc index + component map
-│   │   ├── ARCH_00_SYSTEM_LOGIC.md
-│   │   ├── ARCH_02_PARSER_ANALYSIS_CONVERSION_LOGIC.md
-│   │   ├── ARCH_04_TESTING_VALIDATION_AND_DOWNLOAD_LOGIC.md
-│   │   ├── ARCH_05_FRONTEND_BACKEND_INTERACTION.md
-│   │   ├── SCHEMA_CONTRACTS.md
-│   │   ├── DEVELOPER_GUIDE.md
-│   │   └── … (layer specs, API contracts, diagrams)
+│   ├── architecture/                 ← production architecture (EY review)
+│   │   ├── README.md                 ← start here: numbered docs 01–11 + reference/
+│   │   ├── 01-system-overview.md … 11-frontend-and-api.md
+│   │   └── reference/                ← API, schemas, developer guide
 │
 ├── cobol-modernization-service/      ← Python / FastAPI backend (active implementation)
 │   ├── app/
@@ -69,13 +64,13 @@ cobol/
 
 | Document | Description |
 |---|---|
-| `docs/architecture/ARCHITECTURE_README.md` | Doc index, component map, pipeline approaches |
-| `docs/architecture/ARCH_00_SYSTEM_LOGIC.md` | Full system logic overview |
-| `docs/architecture/ARCH_02_PARSER_ANALYSIS_CONVERSION_LOGIC.md` | Parser, analysis, and both conversion modes |
-| `docs/architecture/ARCH_04_TESTING_VALIDATION_AND_DOWNLOAD_LOGIC.md` | Testing agent, behavioral diff, validation |
-| `docs/architecture/ARCH_05_FRONTEND_BACKEND_INTERACTION.md` | Frontend pages and API contract |
-| `docs/architecture/SCHEMA_CONTRACTS.md` | Data schemas and API contracts |
-| `docs/architecture/DEVELOPER_GUIDE.md` | Developer onboarding |
+| `docs/architecture/README.md` | Architecture index and component map |
+| `docs/architecture/01-system-overview.md` | Global system overview |
+| `docs/architecture/02-pipeline-and-data-flow.md` | End-to-end pipeline and modes |
+| `docs/architecture/05-cobol-parsing.md` | Hybrid parser and contracts |
+| `docs/architecture/08-java-conversion.md` | Whole-class and constrained F45 modes |
+| `docs/architecture/11-frontend-and-api.md` | Dashboard and API integration |
+| `docs/architecture/reference/` | API reference, schemas, developer guide |
 
 ### Architecture reference (`docs/architecture/`)
 

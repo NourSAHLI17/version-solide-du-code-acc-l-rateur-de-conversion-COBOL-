@@ -22,12 +22,11 @@ Or from repo root: `start_backend.bat` (launches on port 8010).
 | `app/services/` | `PipelineService`, testing, behavioral diff, repairs |
 | `app/validation/` | `ValidationService` |
 | `tests/` | pytest suite |
-| `docs/` | Canonical architecture source (copied to `../docs/architecture/`) |
+| `docs/` | Pointer to `../docs/architecture/` (single source of truth) |
 
 ## Architecture documentation
 
-High-level docs for EY review: `../docs/architecture/`. The `docs/` folder here is the
-canonical source; updates should be mirrored to `../docs/architecture/` when changed.
+High-level docs for EY review: `../docs/architecture/`. Update architecture docs there only.
 
 ## Related projects
 
