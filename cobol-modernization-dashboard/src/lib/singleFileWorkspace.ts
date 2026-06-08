@@ -1,4 +1,7 @@
 import { extractProgramId } from "@/lib/programId";
+import type { ConversionScoreModel } from "@/lib/conversionScore";
+import type { RepairSummary } from "@/lib/repairSummary";
+import type { SmokeTestResult } from "@/components/SmokeTestPanel";
 import type { AnalysisResult, ParserResult } from "@/lib/types";
 
 export const SINGLE_WORKSPACE_KEY = "cobol-single-workspace";
@@ -10,8 +13,13 @@ export interface SingleFileWorkspace {
   parserOutput: ParserResult;
   analysisOutput: AnalysisResult;
   javaOutput: string | null;
-  score: null;
-  cost: null;
+  score: number | null;
+  cost: number | null;
+  conversionScore?: ConversionScoreModel | null;
+  conversionStatus?: "complete" | "partial" | "failed";
+  compileRepairNotes?: string[];
+  repairSummary?: RepairSummary | null;
+  smokeTest?: SmokeTestResult | null;
   createdAt: string;
   updatedAt: string;
   /** Persist stage error messages across navigation (optional). */

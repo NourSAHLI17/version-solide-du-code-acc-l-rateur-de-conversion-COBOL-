@@ -1,0 +1,45 @@
+{
+    "program": "RECOVRY",
+    "stdout_md5": "83b04a8ec4a7844ec1f8e71d714080cb",
+    "stdout_lines": 16,
+    "exit_code": 0,
+    "generated_files": {
+        "DECIRPT.dat": {
+            "md5": "a0ba0dfa8dd808789a9610ddeeb47ba0",
+            "size_bytes": 86721,
+            "record_count": 633
+        },
+        "ESCARPT.dat": {
+            "md5": "2695ba5b2e1e62a2ced5bc8d3f13adca",
+            "size_bytes": 1918,
+            "record_count": 14
+        },
+        "EVALREJ.dat": {
+            "md5": "97963680b8f511ecfe7fc981c55f1e4c",
+            "size_bytes": 23760
+        },
+        "LETTERS.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        },
+        "RECVNEW.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        },
+        "SCORFILE.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        }
+    },
+    "key_metrics": {
+        "class_2_count": 0,
+        "class_3_count": 0,
+        "class_4_count": 0,
+        "total_actions": 0
+    },
+    "cobol_compiler": "cobc (GnuCOBOL) 3.3-dev.0",
+    "captured_at": "2026-05-31T20:32:32.217673+00:00"
+}

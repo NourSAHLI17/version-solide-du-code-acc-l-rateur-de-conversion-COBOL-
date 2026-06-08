@@ -1,0 +1,33 @@
+{
+    "normalize_whitespace": true,
+    "stdout_tolerance": {
+        "default_numeric_tolerance_pct": 0.001,
+        "exact_fields": [
+            "CLASS 2 LOANS",
+            "CLASS 3 LOANS",
+            "CLASS 4 LOANS",
+            "SMS",
+            "EMAIL",
+            "PHONE",
+            "DUL",
+            "LEG",
+            "GTR",
+            "RST",
+            "CRT",
+            "CSZ",
+            "WOF"
+        ],
+        "tolerant_fields": {
+            "AMOUNT:": 0.0001
+        },
+        "ignore_fields": [
+            "RECOVRY v",
+            "START 20",
+            "date",
+            "RUN TIMESTAMP",
+            "PAGE NUMBER",
+            "BATCH ID"
+        ]
+    },
+    "generated_files_tolerance": {}
+}

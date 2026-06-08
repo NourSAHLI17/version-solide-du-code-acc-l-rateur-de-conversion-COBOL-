@@ -41,8 +41,11 @@ class CobolSegmenter:
         lines = self._preprocess_for_segmentation(source_code)
         paragraph_to_lines = self._map_paragraphs_to_lines(lines, parser_output.get("paragraphs", []))
         
-        symbol_names = {s["name"] for s in parser_output.get("symbol_table", [])}
-        symbol_table = list(parser_output.get("symbol_table", []))
+        from app.services.symbol_table import resolve_symbol_entries
+
+        entries = resolve_symbol_entries(parser_output)
+        symbol_names = {s["name"] for s in entries}
+        symbol_table = list(entries)
         control_flow = parser_output.get("control_flow", {"branches": [], "loops": [], "calls": []})
         operations = list(parser_output.get("operations", []))
 

@@ -25,6 +25,8 @@ def create_parser(config: AppConfig) -> CobolParser:
     """
 
     backend = config.parser_backend.lower()
+    # hybrid (default): heuristic JSON is always produced; ANTLR enriches ops/control-flow when available.
+    # heuristic: fastest path, no grammar runtime. antlr: syntax validation only, no ANTLR operation merge.
     if backend == "heuristic":
         return ParserLayer()
     if backend == "antlr":

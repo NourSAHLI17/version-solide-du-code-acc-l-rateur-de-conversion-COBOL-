@@ -8,7 +8,13 @@ from app.parsers.antlr_parser import AntlrCobolParser
 
 
 class HybridCobolParser:
-    """Parser backend that merges grammar-backed visitor output with heuristic extraction."""
+    """
+    Production parser backend.
+
+    Heuristic ParserLayer owns the JSON contract; ANTLR adds grammar-backed operations
+    and control-flow when the Cobol85 runtime is provisioned. Degrades to heuristic-only
+    rather than failing the request when ANTLR artifacts are missing.
+    """
 
     def missing_requirements(self) -> List[str]:
         return AntlrCobolParser().missing_requirements()

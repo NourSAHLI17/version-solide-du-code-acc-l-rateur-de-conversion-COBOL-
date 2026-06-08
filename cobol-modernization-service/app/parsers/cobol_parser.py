@@ -4,11 +4,23 @@ import json
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
+from app.converters.cobol_name_converter import (
+    CobolNameConverter,
+    build_paragraph_table,
+    enrich_symbol_table_java_names,
+)
+from app.services.symbol_table import SymbolTable, build_symbol_table_from_parser
+
 
 def text_or_upper(line: Dict[str, object]) -> str:
     """Return a line's normalized text with a resilient fallback."""
 
     return str(line.get("text") or line.get("upper") or "")
+
+
+def _is_procedure_division(upper: str) -> bool:
+    """Match ``PROCEDURE DIVISION.`` and ``PROCEDURE DIVISION USING ...``."""
+    return upper == "PROCEDURE DIVISION." or upper.startswith("PROCEDURE DIVISION ")
 
 
 class ParserLayer:
@@ -120,12 +132,31 @@ class ParserLayer:
         "COMMUNICATION SECTION": "data",
     }
 
-    def parse(self, source_code: str) -> Dict[str, object]:
+    OCCURS_INDEXED_BY_RE = re.compile(
+        r"\bOCCURS\s+(\d+)\s+TIMES(?:\s+INDEXED\s+BY\s+([A-Z][A-Z0-9-]*(?:\s+[A-Z][A-Z0-9-]*)*))?",
+        re.IGNORECASE,
+    )
+
+    FD_SD_RE = re.compile(r"^(FD|SD)\s+([A-Z0-9-]+)\b")
+    DATA_FIELD_RE = re.compile(r"^(?:\d{2}|66|77)\s+([A-Z0-9-]+)\b")
+    COPY_STMT_RE = re.compile(r"^COPY\s+([A-Z0-9-]+)")
+    ALT_RECORD_KEY_RE = re.compile(
+        r"\bALTERNATE\s+RECORD\s+KEY\s+(?:IS\s+)?([A-Z0-9-]+)\b"
+    )
+    PRIMARY_RECORD_KEY_RE = re.compile(
+        r"\bRECORD\s+KEY\s+(?:IS\s+)?([A-Z0-9-]+)\b"
+    )
+
+    def parse(self, source_code: str, *, column_aware: bool = True) -> Dict[str, object]:
         """
         Parse COBOL source into deterministic structural JSON.
 
         Args:
             source_code: Raw COBOL program text.
+            column_aware: When True (default), fixed-format sources honor IBM
+                columns 1-6 (sequence), 7 (indicator), 8-72 (code), 73-80
+                (identification, ignored). Non-blank identification-area content
+                emits a warning.
 
         Returns:
             A JSON-compatible dictionary with divisions, sections, symbols,
@@ -139,45 +170,89 @@ class ParserLayer:
         """
 
         source_format = self._detect_source_format(source_code)
-        lines = self._preprocess(source_code, source_format)
-        preflight_errors = self._preflight_check(lines, source_format)
+        lines = self._preprocess(source_code, source_format, column_aware=column_aware)
+        column_warnings = self._extract_column_area_warnings(lines)
+        file_entries = self._collect_file_entries(lines)
+        preflight_errors = self._preflight_check(lines, source_format, file_entries)
         if preflight_errors:
-            return self._build_preflight_failure(lines, source_format, preflight_errors)
+            all_operations = self._extract_operations(lines, source_format, None)
+            operations = [
+                op
+                for op in all_operations
+                if op.get("type") in {"CALL", "SORT", "RELEASE", "RETURN"}
+            ]
+            control_flow = self._extract_control_flow(lines, source_format)
+            dependencies = self._extract_dependencies(lines, all_operations)
+            return self._build_preflight_failure(
+                lines,
+                source_format,
+                preflight_errors,
+                file_entries,
+                column_aware=column_aware,
+                column_warnings=column_warnings,
+                operations=operations,
+                control_flow=control_flow,
+                dependencies=dependencies,
+            )
 
         divisions = self._extract_divisions(lines)
         sections = self._extract_sections(lines)
         paragraph_index = self._extract_paragraph_index(lines, source_format)
-        symbol_table = self._extract_symbol_table(lines)
-        symbol_names = {str(s["name"]) for s in symbol_table if s.get("name")}
+        symbol_entries = self._extract_symbol_table(lines)
+        symbol_entries = enrich_symbol_table_java_names(symbol_entries)
+        paragraph_table = build_paragraph_table(paragraph_index)
+        symbol_names = {str(s["name"]) for s in symbol_entries if s.get("name")}
         operations = self._extract_operations(lines, source_format, symbol_names)
         control_flow = self._extract_control_flow(lines, source_format)
         dependencies = self._extract_dependencies(lines, operations)
-        risk_flags = self._extract_risk_flags(symbol_table, control_flow, dependencies, lines, operations)
+        risk_flags = self._extract_risk_flags(symbol_entries, control_flow, dependencies, lines, operations)
         warnings = self._extract_warnings(
-            lines, symbol_table, control_flow, operations, paragraph_index,
+            lines, symbol_entries, control_flow, operations, paragraph_index,
         )
+        warnings = column_warnings + warnings
 
-        return {
-            "program_name": self._extract_program_name(lines),
+        dependencies = self._enrich_dependencies_with_file_kinds(dependencies, file_entries)
+        sorts = [op for op in operations if op.get("type") == "SORT"]
+        program_name = self._extract_program_name(lines)
+
+        parser_payload = {
+            "program_name": program_name,
+            "java_class": CobolNameConverter.to_java_class(program_name)
+            if program_name
+            else "",
             "source_format": source_format,
+            "column_aware": column_aware and source_format == "fixed",
             "preflight_errors": [],
+            "errors": [],
+            "files": file_entries,
             "divisions": divisions,
             "sections": sections,
             "paragraphs": paragraph_index,
-            "symbol_table": symbol_table,
+            "paragraph_table": paragraph_table,
+            "symbol_table_entries": symbol_entries,
             "control_flow": control_flow,
             "operations": operations,
+            "sorts": sorts,
             "dependencies": dependencies,
             "risk_flags": risk_flags,
             "warnings": warnings,
             "parser_revision": "2026-02-10",
         }
+        parser_payload["symbol_table"] = build_symbol_table_from_parser(parser_payload)
+        return parser_payload
 
     def _build_preflight_failure(
         self,
         lines: List[Dict[str, object]],
         source_format: str,
         errors: List[str],
+        file_entries: Optional[List[Dict[str, object]]] = None,
+        *,
+        column_aware: bool = True,
+        column_warnings: Optional[List[Dict[str, object]]] = None,
+        operations: Optional[List[Dict[str, object]]] = None,
+        control_flow: Optional[Dict[str, List[Dict[str, object]]]] = None,
+        dependencies: Optional[Dict[str, object]] = None,
     ) -> Dict[str, object]:
         """
         Build a halted parser response when the source fails structural validation.
@@ -200,16 +275,33 @@ class ParserLayer:
         return {
             "program_name": self._extract_program_name(lines),
             "source_format": source_format,
+            "column_aware": column_aware and source_format == "fixed",
             "preflight_errors": errors,
+            "errors": errors,
+            "files": file_entries or [],
             "divisions": [],
             "sections": [],
             "paragraphs": [],
-            "symbol_table": [],
-            "control_flow": {"branches": [], "loops": [], "calls": [], "gotos": []},
-            "operations": [],
-            "dependencies": {"copybooks": [], "files": [], "external_calls": []},
+            "symbol_table_entries": [],
+            "symbol_table": SymbolTable(str(self._extract_program_name(lines) or "PROGRAM")),
+            "control_flow": control_flow
+            or {"branches": [], "loops": [], "calls": [], "gotos": []},
+            "operations": operations or [],
+            "sorts": [op for op in (operations or []) if op.get("type") == "SORT"],
+            "dependencies": dependencies
+            or {
+                "copybooks": [],
+                "files": [],
+                "file_entries": file_entries or [],
+                "file_kinds": {
+                    str(entry["name"]): str(entry["kind"])
+                    for entry in (file_entries or [])
+                },
+                "file_bindings": {},
+                "external_calls": [],
+            },
             "risk_flags": [],
-            "warnings": [],
+            "warnings": list(column_warnings or []),
         }
 
     def _detect_source_format(self, source_code: str) -> str:
@@ -239,13 +331,20 @@ class ParserLayer:
                 fixed_like += 1
         return "fixed" if fixed_like >= max(1, len(candidates) // 3) else "free"
 
-    def _preprocess(self, source_code: str, source_format: str) -> List[Dict[str, object]]:
+    def _preprocess(
+        self,
+        source_code: str,
+        source_format: str,
+        *,
+        column_aware: bool = True,
+    ) -> List[Dict[str, object]]:
         """
         Normalize COBOL source lines while preserving area and continuation metadata.
 
         Args:
             source_code: Raw COBOL program text.
             source_format: `"fixed"` or `"free"`.
+            column_aware: Apply fixed-format column rules when ``source_format`` is ``fixed``.
 
         Returns:
             Logical statement lines enriched with source-area metadata.
@@ -262,7 +361,9 @@ class ParserLayer:
         for line_number, raw_line in enumerate(source_code.splitlines(), start=1):
             line = raw_line.rstrip("\n\r")
             if source_format == "fixed":
-                entry = self._preprocess_fixed_line(line, line_number)
+                entry = self._preprocess_fixed_line(
+                    line, line_number, column_aware=column_aware,
+                )
             else:
                 entry = self._preprocess_free_line(line, line_number)
 
@@ -299,7 +400,90 @@ class ParserLayer:
 
             processed.append(entry)
 
-        return self._merge_compute_continuations(processed)
+        return self._merge_sort_continuations(self._merge_compute_continuations(processed))
+
+    def _merge_sort_continuations(
+        self, processed: List[Dict[str, object]]
+    ) -> List[Dict[str, object]]:
+        """Join multi-line SORT statements (ON KEY / INPUT / OUTPUT PROCEDURE clauses)."""
+
+        if not processed:
+            return processed
+
+        out: List[Dict[str, object]] = []
+        index = 0
+        while index < len(processed):
+            current = processed[index]
+            upper = str(current["upper"]).strip()
+            if not re.match(r"^SORT\s+", upper):
+                out.append(current)
+                index += 1
+                continue
+
+            merged = current
+            index += 1
+            while index < len(processed):
+                if str(merged["text"]).rstrip().endswith("."):
+                    break
+                nxt = processed[index]
+                nxt_upper = str(nxt["upper"]).strip()
+                if self._is_standalone_paragraph_label(nxt_upper):
+                    break
+                if re.match(r"^(ON|INPUT|OUTPUT|THRU)\b", nxt_upper):
+                    merged = self._merge_line_entries(merged, nxt)
+                    index += 1
+                    continue
+                break
+            out.append(merged)
+        return out
+
+    @staticmethod
+    def _is_standalone_paragraph_label(upper: str) -> bool:
+        return bool(re.match(r"^[A-Z0-9][A-Z0-9-]*\.\s*$", upper.strip()))
+
+    def _parse_sort_statement(
+        self, text: str, paragraph: Optional[str]
+    ) -> Optional[Dict[str, object]]:
+        upper = text.upper().strip().rstrip(".")
+        match = re.match(r"^SORT\s+([A-Z0-9-]+)\s+(.*)$", upper, re.DOTALL)
+        if not match:
+            return None
+
+        file_name = match.group(1)
+        rest = match.group(2)
+        keys: List[Dict[str, str]] = []
+        for key_match in re.finditer(
+            r"ON\s+(ASCENDING|DESCENDING)\s+KEY\s+([A-Z0-9-]+)", rest
+        ):
+            keys.append({"direction": key_match.group(1), "field": key_match.group(2)})
+
+        operation: Dict[str, object] = {
+            "type": "SORT",
+            "file": file_name,
+            "keys": keys,
+        }
+
+        input_match = re.search(
+            r"INPUT\s+PROCEDURE\s+(?:IS\s+)?([A-Z0-9-]+)(?:\s+THRU\s+([A-Z0-9-]+))?",
+            rest,
+        )
+        if input_match:
+            operation["input_procedure"] = {"from": input_match.group(1)}
+            if input_match.group(2):
+                operation["input_procedure"]["thru"] = input_match.group(2)
+
+        output_match = re.search(
+            r"OUTPUT\s+PROCEDURE\s+(?:IS\s+)?([A-Z0-9-]+)(?:\s+THRU\s+([A-Z0-9-]+))?",
+            rest,
+        )
+        if output_match:
+            operation["output_procedure"] = {"from": output_match.group(1)}
+            if output_match.group(2):
+                operation["output_procedure"]["thru"] = output_match.group(2)
+
+        if paragraph:
+            operation["paragraph"] = paragraph
+        return operation
 
     def _merge_line_entries(
         self,
@@ -354,10 +538,30 @@ class ParserLayer:
             out.append(cur)
         return out
 
-    def _preprocess_fixed_line(self, line: str, line_number: int) -> Optional[Dict[str, object]]:
-        padded = line.ljust(72)
-        indicator = padded[6] if len(padded) >= 7 else ""
-        body = padded[7:72]
+    def _preprocess_fixed_line(
+        self,
+        line: str,
+        line_number: int,
+        *,
+        column_aware: bool = True,
+    ) -> Optional[Dict[str, object]]:
+        """
+        Parse one fixed-format physical line.
+
+        Columns (1-based): 1-6 sequence (ignored), 7 indicator, 8-72 code,
+        73-80 identification (ignored; warns when non-blank if column_aware).
+        """
+
+        # Sequence area cols 1-6 — not used for parsing.
+        indicator = line[6] if len(line) > 6 else " "
+        if column_aware:
+            body = line[7:72]
+            ident_area = line[72:80]
+            exceeds_column_72 = bool(ident_area.strip())
+        else:
+            body = line[7:]
+            exceeds_column_72 = False
+
         if indicator in {"*", "/"}:
             return None
 
@@ -382,6 +586,7 @@ class ParserLayer:
             "starts_in_area_a": starts_in_area_a,
             "source_format": "fixed",
             "continued": False,
+            "exceeds_column_72": exceeds_column_72,
         }
 
     def _preprocess_free_line(self, line: str, line_number: int) -> Optional[Dict[str, object]]:
@@ -413,7 +618,7 @@ class ParserLayer:
         return None
 
     DIVISION_PATTERN = re.compile(
-        r"^(IDENTIFICATION|ID|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION\.?$",
+        r"^(IDENTIFICATION|ID|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION\b",
         re.IGNORECASE,
     )
 
@@ -448,7 +653,7 @@ class ParserLayer:
 
         for line in lines:
             upper = line["upper"]
-            if upper == "PROCEDURE DIVISION.":
+            if _is_procedure_division(upper):
                 in_procedure = True
                 continue
             if not in_procedure or upper.endswith("SECTION."):
@@ -471,7 +676,7 @@ class ParserLayer:
             if upper == "DATA DIVISION.":
                 in_data_division = True
                 continue
-            if upper == "PROCEDURE DIVISION.":
+            if _is_procedure_division(upper):
                 break
 
             if upper.endswith("SECTION."):
@@ -523,9 +728,23 @@ class ParserLayer:
             if redefines_match:
                 symbol["redefines"] = redefines_match.group(1)
 
-            occurs_match = re.search(r"\bOCCURS\s+(\d+)\s+TIMES\b", rest)
+            occurs_match = self.OCCURS_INDEXED_BY_RE.search(rest)
             if occurs_match:
-                symbol["occurs"] = int(occurs_match.group(1))
+                occurs_count = int(occurs_match.group(1))
+                symbol["occurs"] = occurs_count
+                indexed_by_raw = occurs_match.group(2)
+                if indexed_by_raw:
+                    index_names = indexed_by_raw.split()
+                    symbol["indexed_by"] = index_names
+                    for index_name in index_names:
+                        symbols.append({
+                            "name": index_name,
+                            "kind": "index",
+                            "parent_table": name,
+                            "occurs_count": occurs_count,
+                            "section": current_section,
+                            "parent": name,
+                        })
 
             symbol["kind"] = self._infer_symbol_kind(symbol)
 
@@ -719,7 +938,7 @@ class ParserLayer:
             upper = line["upper"]
             text = line["text"]
 
-            if upper == "PROCEDURE DIVISION.":
+            if _is_procedure_division(upper):
                 in_procedure = True
                 continue
             if not in_procedure:
@@ -984,6 +1203,13 @@ class ParserLayer:
                     "type": "CALL",
                     "target": call_match.group(1),
                 }
+                using_raw = call_match.group(2)
+                if using_raw:
+                    call_entry["using"] = [
+                        part.strip().upper()
+                        for part in re.split(r"\s+", using_raw.strip())
+                        if part.strip()
+                    ]
                 if current_paragraph:
                     call_entry["paragraph"] = current_paragraph
                 calls.append(call_entry)
@@ -1004,7 +1230,7 @@ class ParserLayer:
             upper = line["upper"]
             text = line["text"]
 
-            if upper == "PROCEDURE DIVISION.":
+            if _is_procedure_division(upper):
                 in_procedure = True
                 continue
             if not in_procedure:
@@ -1453,10 +1679,38 @@ class ParserLayer:
                 operation["paragraph"] = paragraph
             return operation
 
+        sort_op = self._parse_sort_statement(upper_text, paragraph)
+        if sort_op:
+            return sort_op
+
+        release_match = re.match(r"^RELEASE\s+([A-Z0-9-]+)\.?$", upper_text)
+        if release_match:
+            operation = {"type": "RELEASE", "record": release_match.group(1)}
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
+        return_match = re.match(r"^RETURN\s+([A-Z0-9-]+)\b", upper_text)
+        if return_match:
+            operation = {"type": "RETURN", "file": return_match.group(1)}
+            if paragraph:
+                operation["paragraph"] = paragraph
+            return operation
+
         # --- CALL external program ---
-        call_match = re.match(r"^CALL\s+['\"]?([A-Z0-9-]+)['\"]?.*$", upper_text)
+        call_match = re.match(
+            r"^CALL\s+['\"]?([A-Z0-9-]+)['\"]?(?:\s+USING\s+(.+?))?\.?$",
+            upper_text,
+        )
         if call_match:
             operation = {"type": "CALL", "target": call_match.group(1)}
+            using_raw = call_match.group(2)
+            if using_raw:
+                operation["using"] = [
+                    part.strip().upper()
+                    for part in re.split(r"\s+", using_raw.strip())
+                    if part.strip()
+                ]
             if paragraph:
                 operation["paragraph"] = paragraph
             return operation
@@ -1467,7 +1721,7 @@ class ParserLayer:
         copybooks = set()
         files = set()
         file_bindings = {}
-        external_calls = set()
+        external_calls_map: Dict[str, Dict[str, object]] = {}
 
         pending_select_name: str | None = None
         select_assign_1l = re.compile(
@@ -1489,7 +1743,7 @@ class ParserLayer:
                     file_bindings[pending_select_name] = target
                     pending_select_name = None
                 elif re.match(
-                    r"^(ORGANIZATION|ACCESS|RECORD|FILE|SELECT|FD)\b",
+                    r"^(ORGANIZATION|ACCESS|RECORD|FILE|SELECT|FD|SD)\b",
                     upper,
                 ):
                     pending_select_name = None
@@ -1513,9 +1767,9 @@ class ParserLayer:
                 if son:
                     pending_select_name = son.group(1)
 
-            fd_match = re.match(r"^FD\s+([A-Z0-9-]+)\.?$", upper)
-            if fd_match:
-                files.add(fd_match.group(1))
+            fd_sd_match = self.FD_SD_RE.match(upper)
+            if fd_sd_match:
+                files.add(fd_sd_match.group(2))
 
             if upper == "DELETE FILE" and index + 1 < len(lines):
                 next_upper = lines[index + 1]["upper"].rstrip(".")
@@ -1526,13 +1780,26 @@ class ParserLayer:
             if operation["type"] in {"READ", "WRITE", "REWRITE", "DELETE", "DELETE_FILE"}:
                 files.add(str(operation["target"]))
             if operation["type"] == "CALL":
-                external_calls.add(str(operation["target"]))
+                prog = str(operation["target"])
+                entry = external_calls_map.setdefault(
+                    prog,
+                    {
+                        "program_name": prog,
+                        "type": "sub_program",
+                        "using": [],
+                    },
+                )
+                for param in operation.get("using") or []:
+                    if param not in entry["using"]:
+                        entry["using"].append(param)
 
         return {
             "copybooks": sorted(copybooks),
             "files": sorted(files),
             "file_bindings": file_bindings,
-            "external_calls": sorted(external_calls),
+            "external_calls": [
+                external_calls_map[k] for k in sorted(external_calls_map)
+            ],
         }
 
     def _extract_risk_flags(
@@ -1597,6 +1864,37 @@ class ParserLayer:
         if u.startswith("WS-") or u.startswith("ACCT-") or u.startswith("EMP-"):
             return True
         return False
+
+    def _extract_column_area_warnings(
+        self,
+        lines: List[Dict[str, object]],
+    ) -> List[Dict[str, object]]:
+        """Emit warnings for fixed-format lines with non-blank identification area (cols 73-80)."""
+
+        warnings: List[Dict[str, object]] = []
+        seen: set = set()
+        for line in lines:
+            if not line.get("exceeds_column_72"):
+                continue
+            line_number = line.get("line_number")
+            if line_number is None:
+                nums = line.get("line_numbers") or []
+                line_number = nums[0] if nums else None
+            if line_number is not None:
+                message = f"Line {line_number}: line exceeds column 72"
+            else:
+                message = "line exceeds column 72"
+            key = (line_number, message)
+            if key in seen:
+                continue
+            seen.add(key)
+            warnings.append({
+                "code": "W007",
+                "severity": "low",
+                "message": message,
+                "line_number": line_number,
+            })
+        return warnings
 
     def _extract_warnings(
         self,
@@ -1707,7 +2005,12 @@ class ParserLayer:
 
         return warnings
 
-    def _preflight_check(self, lines: List[Dict[str, object]], source_format: str) -> List[str]:
+    def _preflight_check(
+        self,
+        lines: List[Dict[str, object]],
+        source_format: str,
+        file_entries: Optional[List[Dict[str, object]]] = None,
+    ) -> List[str]:
         """
         Validate structural COBOL issues before full parsing proceeds.
 
@@ -1740,14 +2043,26 @@ class ParserLayer:
             errors.append(f"Duplicate data name {name} detected in data declarations.")
 
         select_files = self._collect_selected_files(lines)
-        fd_files = self._collect_fd_files(lines)
-        missing_fds = sorted(select_files - fd_files)
-        for file_name in missing_fds:
-            errors.append(f"FILE-CONTROL references {file_name} but no matching FD entry was found.")
+        file_descriptions = {
+            str(entry["name"]): str(entry["kind"])
+            for entry in (file_entries or self._collect_file_entries(lines))
+        }
+        missing_descriptions = sorted(select_files - set(file_descriptions))
+        for file_name in missing_descriptions:
+            errors.append(
+                f"FILE-CONTROL references {file_name} but no FD or SD entry was found."
+            )
 
-        declared_names = {declaration["name"] for declaration in declarations}
+        errors.extend(
+            self._validate_record_keys(
+                file_entries or self._collect_file_entries(lines),
+                self._collect_file_control_record_keys(lines),
+            )
+        )
+
+        symbol_lookup = self._build_varying_target_lookup(lines, declarations)
         for iterator in self._collect_perform_varying_iterators(lines):
-            if iterator not in declared_names:
+            if not self._is_valid_perform_varying_target(iterator, symbol_lookup):
                 errors.append(f"PERFORM VARYING uses undeclared index {iterator}.")
 
         # 4. No reserved word used as paragraph name (REQ-2)
@@ -1774,7 +2089,7 @@ class ParserLayer:
             if upper == "DATA DIVISION.":
                 in_data_division = True
                 continue
-            if upper == "PROCEDURE DIVISION.":
+            if _is_procedure_division(upper):
                 break
 
             if upper.endswith("SECTION.") and upper[:-1] in self.DATA_SECTION_TYPES:
@@ -1787,6 +2102,93 @@ class ParserLayer:
                 declarations.append({"name": match.group(1)})
 
         return declarations
+
+    def _collect_indexed_by_names(self, lines: List[Dict[str, object]]) -> Set[str]:
+        """Collect index identifiers declared via OCCURS ... INDEXED BY."""
+
+        names: Set[str] = set()
+        in_data_division = False
+
+        for line in lines:
+            upper = line["upper"]
+            if upper == "DATA DIVISION.":
+                in_data_division = True
+                continue
+            if _is_procedure_division(upper):
+                break
+            if upper.endswith("SECTION.") and upper[:-1] in self.DATA_SECTION_TYPES:
+                in_data_division = True
+            if not in_data_division:
+                continue
+
+            occurs_match = self.OCCURS_INDEXED_BY_RE.search(upper)
+            if occurs_match and occurs_match.group(2):
+                names.update(occurs_match.group(2).split())
+
+        return names
+
+    def _build_varying_target_lookup(
+        self,
+        lines: List[Dict[str, object]],
+        declarations: List[Dict[str, str]],
+    ) -> Dict[str, str]:
+        """
+        Build a name -> kind map for PERFORM VARYING iterator validation.
+
+        Accepts OCCURS INDEXED BY names (kind ``index``) and numeric PIC data
+        items (kind ``numeric``). Other declared data names are also retained for
+        backward compatibility with existing programs that use a PIC 9 counter.
+        """
+
+        lookup: Dict[str, str] = {}
+        for index_name in self._collect_indexed_by_names(lines):
+            lookup[index_name] = "index"
+
+        in_data_division = False
+        for line in lines:
+            upper = line["upper"]
+            if upper == "DATA DIVISION.":
+                in_data_division = True
+                continue
+            if _is_procedure_division(upper):
+                break
+            if upper.endswith("SECTION.") and upper[:-1] in self.DATA_SECTION_TYPES:
+                in_data_division = True
+            if not in_data_division:
+                continue
+
+            match = re.match(r"^(?:\d{2}|66|77|88)\s+([A-Z0-9-]+)(?P<rest>.*?)(?:\.)?$", upper)
+            if not match:
+                continue
+            name = match.group(1)
+            rest = match.group(2)
+            if name in lookup and lookup[name] == "index":
+                continue
+            pic_match = re.search(r"\bPIC(?:TURE)?\s+([A-Z0-9\(\)SVXAN\-\+Z]+)", rest)
+            if pic_match and ("9" in pic_match.group(1) or "S9" in pic_match.group(1)):
+                lookup[name] = "numeric"
+            elif name not in lookup:
+                lookup[name] = "data"
+
+        for declaration in declarations:
+            name = declaration["name"]
+            lookup.setdefault(name, "data")
+
+        return lookup
+
+    def _is_valid_perform_varying_target(
+        self,
+        name: str,
+        symbol_lookup: Dict[str, str],
+    ) -> bool:
+        kind = symbol_lookup.get(name)
+        if kind == "index":
+            return True
+        if kind == "numeric":
+            return True
+        if kind == "data":
+            return True
+        return False
 
     def _collect_selected_files(self, lines: List[Dict[str, object]]) -> set[str]:
         files = set()
@@ -1803,7 +2205,7 @@ class ParserLayer:
                     files.add(pending)
                     pending = None
                 elif re.match(
-                    r"^(ORGANIZATION|ACCESS|RECORD|FILE|SELECT|FD)\b",
+                    r"^(ORGANIZATION|ACCESS|RECORD|FILE|SELECT|FD|SD)\b",
                     upper,
                 ):
                     pending = None
@@ -1817,13 +2219,225 @@ class ParserLayer:
                     pending = son.group(1)
         return files
 
-    def _collect_fd_files(self, lines: List[Dict[str, object]]) -> set[str]:
-        files = set()
-        for line in lines:
-            match = re.match(r"^FD\s+([A-Z0-9-]+)\.?$", line["upper"])
+    def _is_copy_expansion_marker(self, upper: str) -> bool:
+        return (
+            ">>>BEGIN COPY" in upper
+            or ">>>END COPY" in upper
+            or ">>>UNRESOLVED COPY" in upper
+            or ">>>CIRCULAR COPY" in upper
+        )
+
+    def _extract_fields_from_source_text(self, source_text: str) -> List[Dict[str, str]]:
+        """Extract level-01..77 data names from raw copybook or COBOL text."""
+
+        fields: List[Dict[str, str]] = []
+        for raw_line in source_text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("*"):
+                continue
+            normalized = re.sub(r"\s+", " ", stripped).strip().upper()
+            if self._is_copy_expansion_marker(normalized):
+                continue
+            match = self.DATA_FIELD_RE.match(normalized)
             if match:
-                files.add(match.group(1))
-        return files
+                fields.append({"name": match.group(1)})
+        return fields
+
+    def _load_copybook_fields(self, copy_name: str) -> List[Dict[str, str]]:
+        """Resolve a COPY book from configured library paths and extract field names."""
+
+        from app.parsers.copybook_resolver import find_copy_book
+
+        path = find_copy_book(copy_name)
+        if not path:
+            return []
+        try:
+            content = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return []
+        return self._extract_fields_from_source_text(content)
+
+    def _parse_record_keys_from_line(self, upper: str) -> Tuple[List[str], List[str]]:
+        alternate = [m.group(1) for m in self.ALT_RECORD_KEY_RE.finditer(upper)]
+        stripped = self.ALT_RECORD_KEY_RE.sub("", upper)
+        primary = [m.group(1) for m in self.PRIMARY_RECORD_KEY_RE.finditer(stripped)]
+        return primary, alternate
+
+    def _collect_file_control_record_keys(
+        self,
+        lines: List[Dict[str, object]],
+    ) -> Dict[str, Dict[str, List[str]]]:
+        """
+        Collect RECORD KEY and ALTERNATE RECORD KEY names from FILE-CONTROL SELECT entries.
+
+        Returns:
+            {file_name: {"primary": [...], "alternate": [...]}}
+        """
+
+        keys_by_file: Dict[str, Dict[str, List[str]]] = {}
+        current_file: Optional[str] = None
+        in_file_control = False
+
+        for line in lines:
+            upper = str(line["upper"]).strip()
+            if upper.endswith("FILE-CONTROL."):
+                in_file_control = True
+                continue
+            if upper == "DATA DIVISION.":
+                break
+            if not in_file_control:
+                continue
+
+            select_match = re.match(r"^SELECT\s+([A-Z0-9-]+)\b", upper)
+            if select_match:
+                current_file = select_match.group(1)
+                keys_by_file.setdefault(current_file, {"primary": [], "alternate": []})
+
+            if current_file is None:
+                continue
+
+            primary, alternate = self._parse_record_keys_from_line(upper)
+            keys_by_file[current_file]["primary"].extend(primary)
+            keys_by_file[current_file]["alternate"].extend(alternate)
+
+        return keys_by_file
+
+    def _validate_record_keys(
+        self,
+        file_entries: List[Dict[str, object]],
+        record_keys_by_file: Dict[str, Dict[str, List[str]]],
+    ) -> List[str]:
+        """Ensure SELECT RECORD KEY fields exist in the corresponding FD/SD record.
+
+        Skips validation for FD entries that contain unresolved COPY statements,
+        since the record key fields are likely defined inside the missing copybook.
+        """
+
+        errors: List[str] = []
+        entries_by_name = {
+            str(entry["name"]): entry for entry in file_entries if entry.get("name")
+        }
+
+        for file_name, key_groups in record_keys_by_file.items():
+            entry = entries_by_name.get(file_name)
+            if entry is None:
+                continue
+
+            if entry.get("_has_unresolved_copy"):
+                continue
+
+            fields = entry.get("fields") or []
+            field_names = {str(f["name"]) for f in fields if isinstance(f, dict) and f.get("name")}
+            for key_name in key_groups.get("primary", []) + key_groups.get("alternate", []):
+                if key_name not in field_names:
+                    errors.append(
+                        f"RECORD KEY {key_name} for {file_name} is not defined in FD record description."
+                    )
+
+        return errors
+
+    def _append_fd_fields(
+        self,
+        current: Dict[str, object],
+        new_fields: List[Dict[str, str]],
+    ) -> None:
+        fields = current["fields"]
+        assert isinstance(fields, list)
+        existing = {str(f["name"]) for f in fields if isinstance(f, dict) and f.get("name")}
+        for field in new_fields:
+            if field["name"] not in existing:
+                fields.append(field)
+                existing.add(field["name"])
+
+    def _collect_file_entries(self, lines: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        """
+        Collect FD and SD file-description entries from the FILE SECTION.
+
+        Includes fields from inline data declarations and from COPY books (expanded
+        in source or resolved from copy library paths).
+
+        Returns:
+            List of {"name": str, "kind": "FD"|"SD", "fields": [{"name": str}, ...]}.
+        """
+
+        entries: List[Dict[str, object]] = []
+        current: Dict[str, object] | None = None
+        in_data_division = False
+        in_file_section = False
+
+        for line in lines:
+            upper = str(line["upper"]).strip()
+            if upper == "DATA DIVISION.":
+                in_data_division = True
+                in_file_section = False
+                continue
+            if _is_procedure_division(upper):
+                break
+            if not in_data_division:
+                continue
+
+            if upper == "FILE SECTION.":
+                in_file_section = True
+                continue
+            if upper.endswith(" SECTION.") and upper != "FILE SECTION.":
+                in_file_section = False
+                if current is not None:
+                    entries.append(current)
+                    current = None
+                continue
+
+            if not in_file_section:
+                continue
+
+            fd_sd_match = self.FD_SD_RE.match(upper)
+            if fd_sd_match:
+                if current is not None:
+                    entries.append(current)
+                current = {
+                    "name": fd_sd_match.group(2),
+                    "kind": fd_sd_match.group(1),
+                    "fields": [],
+                }
+                continue
+
+            if current is None:
+                continue
+
+            if self._is_copy_expansion_marker(upper):
+                continue
+
+            copy_match = self.COPY_STMT_RE.match(upper)
+            if copy_match:
+                resolved_fields = self._load_copybook_fields(copy_match.group(1))
+                if resolved_fields:
+                    self._append_fd_fields(current, resolved_fields)
+                else:
+                    current["_has_unresolved_copy"] = True
+                continue
+
+            field_match = self.DATA_FIELD_RE.match(upper)
+            if field_match:
+                self._append_fd_fields(current, [{"name": field_match.group(1)}])
+
+        if current is not None:
+            entries.append(current)
+
+        return entries
+
+    def _collect_fd_files(self, lines: List[Dict[str, object]]) -> set[str]:
+        return {str(entry["name"]) for entry in self._collect_file_entries(lines)}
+
+    def _enrich_dependencies_with_file_kinds(
+        self,
+        dependencies: Dict[str, object],
+        file_entries: List[Dict[str, object]],
+    ) -> Dict[str, object]:
+        enriched = dict(dependencies)
+        enriched["file_entries"] = file_entries
+        enriched["file_kinds"] = {
+            str(entry["name"]): str(entry["kind"]) for entry in file_entries
+        }
+        return enriched
 
     def _collect_perform_varying_iterators(self, lines: List[Dict[str, object]]) -> List[str]:
         iterators: List[str] = []

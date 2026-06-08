@@ -7,6 +7,8 @@ const LEGACY_LINKS = [
   { href: "/", label: "Legacy home" },
   { href: "/conversion", label: "Pipeline Runner" },
   { href: "/cockpit/project", label: "Old project upload" },
+  { href: "/testing", label: "Testing" },
+  { href: "/testing/legacy", label: "Testing (legacy)" },
   { href: "/parser", label: "Parser" },
   { href: "/analysis", label: "Analysis" },
 ];

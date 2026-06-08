@@ -1,0 +1,137 @@
+{
+  "target_type": "single_file",
+  "target_id": "verify-sf-live",
+  "project_id": null,
+  "run_id": "verify-sf-live",
+  "program_name": "HELLO",
+  "created_at": "2026-05-19T14:39:00.348267+00:00",
+  "status": "failed",
+  "execution_mode": "live",
+  "fallback_mode": false,
+  "toolchain_status": {
+    "cobc": {
+      "available": true,
+      "detail": "cobc (GnuCOBOL) 3.3-dev.0\r",
+      "error": null
+    },
+    "javac": {
+      "available": true,
+      "detail": "javac 21",
+      "error": null
+    },
+    "java": {
+      "available": true,
+      "detail": "java version \"21\" 2023-09-19 LTS\r",
+      "error": null
+    },
+    "live_ready": true,
+    "missing_tools": []
+  },
+  "input_set": {
+    "id": "behavioral-set",
+    "name": "Behavioral scenarios",
+    "scenarios": [
+      {
+        "id": "default",
+        "label": "Default scenario",
+        "inputs": {},
+        "scripted_input": ""
+      }
+    ]
+  },
+  "cobol_output": "",
+  "java_output": "HELLO\r\n",
+  "diff_summary": {
+    "lines_compared": 1,
+    "lines_matched": 0,
+    "lines_diverged": 1,
+    "paragraph_breakdown": [],
+    "total_lines_cobol": 0,
+    "total_lines_java": 1,
+    "matching_lines": 0,
+    "differing_lines": 1,
+    "diff_percentage": 100.0,
+    "first_mismatch_index": 0,
+    "cobol_normalized": "",
+    "java_normalized": "HELLO",
+    "highlights": [
+      {
+        "line": 1,
+        "cobol": "",
+        "java": "HELLO",
+        "failure_kind": "extra_java_line",
+        "likely_paragraph": null,
+        "attribution_method": "none"
+      }
+    ]
+  },
+  "failed_tests": [
+    {
+      "id": "BEH_default",
+      "scenario_id": "default",
+      "description": "Java produced additional output \u2014 stdout line 1",
+      "severity": "high",
+      "failure_kind": "extra_java_line",
+      "likely_paragraph": null
+    }
+  ],
+  "failure_reason": "Java produced additional output at stdout line 1. Line count or blank-line structure differs between COBOL and Java stdout, so a DISPLAY or STOP/RUN path may be missing or duplicated in the conversion. Recommended retry: Re-run conversion for the procedure section that owns the mismatched stdout.",
+  "affected_paragraphs": [],
+  "retry_scope": "",
+  "execution_details": [
+    {
+      "scenario_id": "default",
+      "scripted_input": "",
+      "cobol_execution": {
+        "stdout": "",
+        "stderr": "'C:\\Users\\LENOVO\\AppData\\Local\\GnuCOBOL\\bin' n'est pas reconnu en tant que commande interne\r\nou externe, un programme ex\ufffdcutable ou un fichier de commandes.\r\n",
+        "exit_code": 1,
+        "duration_ms": 0.0,
+        "mode": "executed",
+        "execution_status": "compile_failure",
+        "error": "cobol compile failed (exit 1)",
+        "compile_stdout": "",
+        "compile_stderr": "'C:\\Users\\LENOVO\\AppData\\Local\\GnuCOBOL\\bin' n'est pas reconnu en tant que commande interne\r\nou externe, un programme ex\ufffdcutable ou un fichier de commandes.\r\n"
+      },
+      "java_execution": {
+        "stdout": "HELLO\r\n",
+        "stderr": "",
+        "exit_code": 0,
+        "duration_ms": 115.13199999171775,
+        "mode": "executed",
+        "execution_status": "success",
+        "error": null,
+        "compile_stdout": "",
+        "compile_stderr": ""
+      },
+      "diff": {
+        "total_lines_cobol": 0,
+        "total_lines_java": 1,
+        "matching_lines": 0,
+        "differing_lines": 1,
+        "diff_percentage": 100.0,
+        "first_mismatch_index": 0,
+        "cobol_normalized": "",
+        "java_normalized": "HELLO",
+        "lines_compared": 1,
+        "lines_matched": 0,
+        "lines_diverged": 1,
+        "paragraph_breakdown": [],
+        "highlights": [
+          {
+            "line": 1,
+            "cobol": "",
+            "java": "HELLO"
+          }
+        ]
+      }
+    }
+  ],
+  "file_results": null,
+  "project_summary": null,
+  "failure_mapping": {
+    "scenarios_mapped": 1,
+    "primary_retry_scope": "",
+    "attribution": "deterministic_heuristics"
+  }
+}

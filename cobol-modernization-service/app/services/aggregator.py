@@ -30,9 +30,11 @@ def reconcile_type(a: str, b: str) -> str:
 
 def to_java_class_name(cobol_name: str) -> str:
     """Convert COBOL program name to Java PascalCase class name."""
+    from app.converters.cobol_name_converter import CobolNameConverter
+
     if not cobol_name:
         return "ModernizedProgram"
-    return "".join(w.capitalize() for w in cobol_name.replace("_", "-").split("-"))
+    return CobolNameConverter.to_java_class(cobol_name)
 
 
 def aggregate_segments(
@@ -54,7 +56,9 @@ def aggregate_segments(
     if segment_manifest is None:
         segment_manifest = {}
 
-    symbol_table = {s["name"]: s for s in parser_output.get("symbol_table", [])}
+    from app.services.symbol_table import resolve_symbol_entries
+
+    symbol_table = {s["name"]: s for s in resolve_symbol_entries(parser_output)}
     shared_state = set(segment_manifest.get("shared_state", []))
 
     # ── 1. Deduplicate + reconcile fields ────────────────────────────

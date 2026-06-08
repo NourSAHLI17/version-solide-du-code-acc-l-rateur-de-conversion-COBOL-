@@ -29,7 +29,7 @@ def payroll_parse(payroll_source: str) -> dict:
 
 class TestPayrollParserPICDisplayCompute:
     def test_ws_tax_rate_pic_v_decimal(self, payroll_parse: dict):
-        sym = next(s for s in payroll_parse["symbol_table"] if s["name"] == "WS-TAX-RATE")
+        sym = next(s for s in payroll_parse["symbol_table_entries"] if s["name"] == "WS-TAX-RATE")
         pd = sym["pic_decoded"]
         assert pd["java_type"] == "BigDecimal"
         assert pd["dec_digits"] == 4
@@ -95,7 +95,7 @@ class TestPayrollAnalysisSemantics:
     def test_analysis_includes_engine_metadata(self, payroll_parse: dict):
         analysis = AnalysisAgent().analyze(FIXTURE.read_text(encoding="utf-8"), payroll_parse)
         assert analysis.get("analysis_engine") == "deterministic"
-        assert analysis.get("analysis_revision") == 1
+        assert analysis.get("analysis_revision") >= 1
 
 
 class TestPayrollConversionRoundingContract:

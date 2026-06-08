@@ -1,10 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type DragEventHandler } from "react";
+import { useRouter } from "next/navigation";
 
 import JsonTreeViewer from "@/components/JsonTreeViewer";
 import MonacoCobolEditor from "@/components/MonacoCobolEditor";
 import MonacoJavaViewer from "@/components/MonacoJavaViewer";
+import PipelineStageButton from "@/components/PipelineStageButton";
+import RepairSummaryPanel from "@/components/RepairSummaryPanel";
+import ScoreCard from "@/components/ScoreCard";
+import SmokeTestPanel from "@/components/SmokeTestPanel";
+import { normalizeConversionScore, scoreListValue } from "@/lib/conversionScore";
 import { SINGLE_BOOTSTRAP_KEY } from "@/lib/bootstrapKeys";
 import { extractProgramId } from "@/lib/programId";
 import {
@@ -16,10 +22,13 @@ import {
 } from "@/lib/singleFileWorkspace";
 import type { AnalysisResult, ParserResult } from "@/lib/types";
 import { analyzeCobol, convertCobol, parseCobol } from "@/lib/api";
+import { queueTestingLaunch } from "@/lib/testingLaunch";
+import { persistTestingReplayWorkspace } from "@/lib/testingReplayHandoff";
+import { persistTestingTargetMode } from "@/lib/testingService";
 import * as historyService from "@/services/historyService";
 
-type Stage = "parser" | "analysis" | "java";
-type UiStatus = "idle" | "loading" | "success" | "error";
+type Stage = "parser" | "analysis" | "java" | "score";
+type UiStatus = "idle" | "loading" | "success" | "error" | "partial";
 
 function downloadText(filename: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
@@ -31,47 +40,11 @@ function downloadText(filename: string, content: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
-function StageButton({
-  label,
-  status,
-  disabled,
-  onClick,
-}: {
-  label: string;
-  status: UiStatus;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  const icon =
-    status === "loading" ? (
-      <span className="progress-spinner" style={{ width: 14, height: 14 }} />
-    ) : status === "success" ? (
-      "✅"
-    ) : status === "error" ? (
-      "❌"
-    ) : (
-      "▶"
-    );
-  return (
-    <button
-      type="button"
-      className="action-button primary"
-      disabled={disabled || status === "loading"}
-      onClick={(e) => {
-        e.preventDefault();
-        if (!disabled && status !== "loading") onClick();
-      }}
-      style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
-    >
-      {icon} {label}
-    </button>
-  );
-}
-
 export default function SingleConvertPage() {
+  const router = useRouter();
   const [ws, setWs] = useState<SingleFileWorkspace>(() => newSingleWorkspace(""));
   const [hydrated, setHydrated] = useState(false);
-  const [activeTab, setActiveTab] = useState<"parser" | "analysis" | "java">("parser");
+  const [activeTab, setActiveTab] = useState<Stage>("parser");
   const [parserUi, setParserUi] = useState<UiStatus>("idle");
   const [analysisUi, setAnalysisUi] = useState<UiStatus>("idle");
   const [javaUi, setJavaUi] = useState<UiStatus>("idle");
@@ -101,6 +74,7 @@ export default function SingleConvertPage() {
             parserOutput?: ParserResult;
             analysisOutput?: AnalysisResult;
             javaOutput?: string | null;
+            conversionScore?: SingleFileWorkspace["conversionScore"];
             clearOutputs?: boolean;
           };
           sessionStorage.removeItem(SINGLE_BOOTSTRAP_KEY);
@@ -112,6 +86,13 @@ export default function SingleConvertPage() {
             parserOutput: b.clearOutputs ? null : (b.parserOutput ?? null),
             analysisOutput: b.clearOutputs ? null : (b.analysisOutput ?? null),
             javaOutput: b.clearOutputs ? null : (b.javaOutput ?? null),
+            conversionScore: b.clearOutputs
+              ? null
+              : normalizeConversionScore(b.conversionScore) ?? null,
+            score: b.clearOutputs
+              ? null
+              : scoreListValue(normalizeConversionScore(b.conversionScore)) ??
+                scoreListValue(b.conversionScore ?? null),
             pipelineErrors: b.clearOutputs ? undefined : base.pipelineErrors,
           };
           skipNextSourcePersist.current = true;
@@ -144,7 +125,12 @@ export default function SingleConvertPage() {
       } else {
         const stored = loadSingleWorkspace();
         if (stored) {
-          setWs(stored);
+          const normalizedScore = normalizeConversionScore(stored.conversionScore);
+          setWs({
+            ...stored,
+            conversionScore: normalizedScore,
+            score: scoreListValue(normalizedScore) ?? stored.score ?? null,
+          });
           setParserUi(
             stored.parserOutput && isParserOk(stored.parserOutput)
               ? "success"
@@ -160,6 +146,7 @@ export default function SingleConvertPage() {
             analysisOk && !stored.pipelineErrors?.analysis ? "success" : stored.pipelineErrors?.analysis ? "error" : "idle",
           );
           setJavaUi(stored.javaOutput ? "success" : stored.pipelineErrors?.java ? "error" : "idle");
+          if (normalizedScore) setActiveTab("score");
         }
       }
       setHydrated(true);
@@ -185,6 +172,8 @@ export default function SingleConvertPage() {
         parserOutput: null,
         analysisOutput: null,
         javaOutput: null,
+        conversionScore: null,
+        score: null,
         pipelineErrors: undefined,
         updatedAt: new Date().toISOString(),
       };
@@ -218,6 +207,8 @@ export default function SingleConvertPage() {
       parserOutput: null,
       analysisOutput: null,
       javaOutput: null,
+      conversionScore: null,
+      score: null,
       pipelineErrors: undefined,
       updatedAt: new Date().toISOString(),
     };
@@ -257,6 +248,15 @@ export default function SingleConvertPage() {
     const cur = wsRef.current;
     if (!cur.parserOutput || !isParserOk(cur.parserOutput)) return;
     setAnalysisUi("loading");
+    setJavaUi("idle");
+    persist({
+      ...cur,
+      analysisOutput: null,
+      javaOutput: null,
+      conversionScore: null,
+      score: null,
+      updatedAt: new Date().toISOString(),
+    });
     try {
       const analysisOutput = await analyzeCobol(cur.sourceCode, cur.parserOutput);
       const halted =
@@ -298,15 +298,41 @@ export default function SingleConvertPage() {
     if (!cur.parserOutput || !cur.analysisOutput) return;
     setJavaUi("loading");
     try {
-      const java = await convertCobol(cur.sourceCode, cur.parserOutput, cur.analysisOutput);
-      setJavaUi("success");
+      const {
+        javaCode,
+        conversionScore,
+        conversionStatus,
+        compileErrors,
+        compileStderr,
+        compileRepairNotes,
+        repairSummary,
+        smokeTest,
+      } = await convertCobol(cur.sourceCode, cur.parserOutput, cur.analysisOutput);
+      const isPartial = conversionStatus === "partial";
+      setJavaUi(isPartial ? "partial" : "success");
+      const compileMsg =
+        isPartial && compileErrors?.length
+          ? compileErrors.join("\n")
+          : isPartial && compileStderr
+            ? compileStderr.slice(0, 4000)
+            : undefined;
       persist({
         ...cur,
-        javaOutput: java,
-        pipelineErrors: { ...cur.pipelineErrors, java: undefined },
+        javaOutput: javaCode,
+        conversionScore,
+        conversionStatus,
+        score: scoreListValue(conversionScore),
+        compileRepairNotes: compileRepairNotes?.length ? compileRepairNotes : undefined,
+        repairSummary: repairSummary ?? undefined,
+        smokeTest: smokeTest ?? undefined,
+        compileErrors: compileErrors?.length ? compileErrors : undefined,
+        pipelineErrors: {
+          ...cur.pipelineErrors,
+          java: compileMsg,
+        },
         updatedAt: new Date().toISOString(),
       });
-      setActiveTab("java");
+      setActiveTab(conversionScore ? "score" : "java");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Conversion failed.";
       setError("java", msg);
@@ -340,25 +366,38 @@ export default function SingleConvertPage() {
     const w = wsRef.current;
     const paragraphs = (w.parserOutput as { paragraphs?: unknown[] } | null)?.paragraphs;
     const paragraphCount = Array.isArray(paragraphs) ? paragraphs.length : 0;
-    historyService.add({
-      id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `h-${Date.now()}`,
-      type: "single",
-      programName: w.programName,
-      createdAt: new Date().toISOString(),
-      paragraphCount,
-      score: null,
-      cost: null,
-      parserOutput: w.parserOutput,
-      analysisOutput: w.analysisOutput,
-      javaOutput: w.javaOutput,
-      sourceCode: w.sourceCode,
-    });
-    alert("Saved to History.");
+    void historyService
+      .addAsync({
+        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `h-${Date.now()}`,
+        type: "single",
+        programName: w.programName,
+        createdAt: new Date().toISOString(),
+        paragraphCount,
+        score: scoreListValue(w.conversionScore),
+        cost: null,
+        parserOutput: w.parserOutput,
+        analysisOutput: w.analysisOutput,
+        javaOutput: w.javaOutput,
+        sourceCode: w.sourceCode,
+        conversionScore: w.conversionScore ?? null,
+        conversionScoreRaw: w.conversionScore ?? null,
+      })
+      .then(() => alert("Saved to History (database)."))
+      .catch((err) => alert(err instanceof Error ? err.message : "Failed to save history"));
   };
 
   const parserEnabled = ws.sourceCode.trim().length > 0;
   const analysisEnabled = parserUi === "success" && isParserOk(ws.parserOutput);
   const javaEnabled = analysisUi === "success" && ws.analysisOutput != null;
+  const canRunTesting = Boolean(ws.javaOutput?.trim());
+
+  const goToTesting = useCallback(() => {
+    saveSingleWorkspace(ws);
+    persistTestingReplayWorkspace({ mode: "single_file", workspace: ws });
+    queueTestingLaunch({ mode: "single_file", autoRun: true, source: "conversion" });
+    persistTestingTargetMode("single_file");
+    router.push("/testing");
+  }, [router, ws]);
 
   const onDrop: DragEventHandler<HTMLDivElement> = (e) => {
     e.preventDefault();
@@ -391,14 +430,14 @@ export default function SingleConvertPage() {
       </div>
 
       <div className="glass-card" style={{ padding: 18, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-        <StageButton label="Run Parser" status={parserUi} disabled={!parserEnabled} onClick={() => void runParser()} />
-        <StageButton
+        <PipelineStageButton label="Run Parser" status={parserUi} disabled={!parserEnabled} onClick={() => void runParser()} />
+        <PipelineStageButton
           label="Run Analysis"
           status={analysisUi}
           disabled={!analysisEnabled}
           onClick={() => void runAnalysis()}
         />
-        <StageButton label="Convert to Java" status={javaUi} disabled={!javaEnabled} onClick={() => void runJava()} />
+        <PipelineStageButton label="Convert to Java" status={javaUi} disabled={!javaEnabled} onClick={() => void runJava()} />
       </div>
 
       {errorOpen && (
@@ -435,13 +474,14 @@ export default function SingleConvertPage() {
               ["parser", "Parser Output"],
               ["analysis", "Analysis Output"],
               ["java", "Java Output"],
+              ["score", "Quality Score"],
             ] as const
           ).map(([id, label]) => (
             <button
               key={id}
               type="button"
               className={`stage-tab ${activeTab === id ? "active" : ""}`}
-              data-stage={id === "parser" ? "parser" : id === "analysis" ? "analysis" : "java"}
+              data-stage={id === "parser" ? "parser" : id === "analysis" ? "analysis" : id === "java" ? "java" : "tests"}
               style={{ border: "none", cursor: "pointer" }}
               onClick={() => setActiveTab(id)}
             >
@@ -489,6 +529,15 @@ export default function SingleConvertPage() {
 
         {activeTab === "java" && (
           <div>
+            {(ws.repairSummary || ws.compileRepairNotes?.length) && (
+              <RepairSummaryPanel
+                conversionStatus={ws.conversionStatus}
+                conversionScore={ws.conversionScore}
+                repairSummary={ws.repairSummary}
+                compileRepairNotes={ws.compileRepairNotes}
+                compact
+              />
+            )}
             <MonacoJavaViewer value={ws.javaOutput ?? ""} height="440px" />
             <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
               <button
@@ -510,9 +559,27 @@ export default function SingleConvertPage() {
             </div>
           </div>
         )}
+
+        {activeTab === "score" && (
+          <div className="score-tab-stack">
+            <RepairSummaryPanel
+              conversionStatus={ws.conversionStatus}
+              conversionScore={ws.conversionScore}
+              repairSummary={ws.repairSummary}
+              compileRepairNotes={ws.compileRepairNotes}
+            />
+            <ScoreCard score={ws.conversionScore ?? null} />
+            <SmokeTestPanel smokeTest={ws.smokeTest ?? null} />
+          </div>
+        )}
       </div>
 
       <div className="action-row wrap" style={{ paddingBottom: 32 }}>
+        {canRunTesting ? (
+          <button type="button" className="action-button primary" onClick={goToTesting}>
+            Run Testing
+          </button>
+        ) : null}
         <button type="button" className="action-button primary" onClick={saveHistory}>
           💾 Save to History
         </button>

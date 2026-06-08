@@ -1,0 +1,25 @@
+{
+    "normalize_whitespace": true,
+    "ignore_patterns": [".*START.*", ".*start.*"],
+    "stdout_tolerance": {
+        "default_numeric_tolerance_pct": 0.001,
+        "exact_fields": [
+            "READ",
+            "APPROVED",
+            "CONDITIONAL",
+            "DECLINED"
+        ],
+        "tolerant_fields": {
+            "ERRORS": 0.01
+        },
+        "ignore_fields": [
+            "LOANEVAL v",
+            "START 20",
+            "date",
+            "RUN TIMESTAMP",
+            "PAGE NUMBER",
+            "BATCH ID"
+        ]
+    },
+    "generated_files_tolerance": {}
+}

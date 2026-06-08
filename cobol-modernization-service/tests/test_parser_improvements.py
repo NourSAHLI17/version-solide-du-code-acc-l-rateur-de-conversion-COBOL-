@@ -11,7 +11,7 @@ class Test88LevelConditions:
        PROCEDURE DIVISION.
        """
         result = ParserLayer().parse(source)
-        flag = next(s for s in result["symbol_table"] if s["name"] == "FLAG")
+        flag = next(s for s in result["symbol_table_entries"] if s["name"] == "FLAG")
         assert "condition_names" in flag
         cond = flag["condition_names"][0]
         assert cond["name"] == "IS-ACTIVE"
@@ -26,7 +26,7 @@ class Test88LevelConditions:
        PROCEDURE DIVISION.
        """
         result = ParserLayer().parse(source)
-        status = next(s for s in result["symbol_table"] if s["name"] == "STATUS-CODE")
+        status = next(s for s in result["symbol_table_entries"] if s["name"] == "STATUS-CODE")
         cond = status["condition_names"][0]
         assert cond["name"] == "IS-ERROR"
         assert "40" in cond["values"]
@@ -43,7 +43,7 @@ class Test88LevelConditions:
        PROCEDURE DIVISION.
        """
         result = ParserLayer().parse(source)
-        rec = next(s for s in result["symbol_table"] if s["name"] == "RECORD-TYPE")
+        rec = next(s for s in result["symbol_table_entries"] if s["name"] == "RECORD-TYPE")
         assert len(rec["condition_names"]) == 3
         names = [c["name"] for c in rec["condition_names"]]
         assert names == ["IS-HEADER", "IS-DETAIL", "IS-TRAILER"]
@@ -100,9 +100,11 @@ class TestPICDecoder:
        PROCEDURE DIVISION.
        """
         result = ParserLayer().parse(source)
-        amt = next(s for s in result["symbol_table"] if s["name"] == "AMOUNT")
+        amt = next(s for s in result["symbol_table_entries"] if s["name"] == "AMOUNT")
         assert "pic_decoded" in amt
         assert amt["pic_decoded"]["java_type"] == "BigDecimal"
+        assert amt["java_field"] == "amount"
+        assert result.get("paragraph_table") is not None
 
 
 class TestPerformThruExpansion:

@@ -1,4 +1,6 @@
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -6,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cobol_samples import COB_SIMPLE_INVENTORY
 
+from app.parsers import copybook_resolver
 from app.parsers.cobol_parser import ParserLayer
 
 
@@ -21,13 +24,20 @@ class ParserLayerTests(unittest.TestCase):
                 [
                     "program_name",
                     "source_format",
+                    "column_aware",
                     "preflight_errors",
+                    "errors",
+                    "files",
                     "divisions",
                     "sections",
                     "paragraphs",
+                    "paragraph_table",
+                    "java_class",
                     "symbol_table",
+                    "symbol_table_entries",
                     "control_flow",
                     "operations",
+                    "sorts",
                     "dependencies",
                     "risk_flags",
                     "warnings",
@@ -293,6 +303,29 @@ class ParserLayerTests(unittest.TestCase):
 
     # ─── Structured warnings ─────────────────────────────────────────────
 
+    def test_parser_truncates_at_column_72(self):
+        long_move = (
+            "       MOVE 'A' TO X-VAR-WITH-VERY-LONG-NAME-EXCEEDING-COLUMN-72."
+        )
+        overflow_line = long_move.ljust(72) + "OVERFL"
+        src = f"""
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. COL72TEST.
+       PROCEDURE DIVISION.
+{overflow_line}
+       STOP RUN.
+"""
+        result = self.parser.parse(src)
+        self.assertTrue(result.get("column_aware"))
+        self.assertTrue(
+            any("line exceeds column 72" in w["message"] for w in result["warnings"]),
+            result["warnings"],
+        )
+        move_ops = [op for op in result["operations"] if op.get("type") == "MOVE"]
+        self.assertTrue(move_ops)
+        target = str(move_ops[0].get("target", ""))
+        self.assertNotIn("OVERFL", target)
+
     def test_warnings_are_structured(self):
         """Warnings should now be structured with code/severity/message."""
         source = """
@@ -319,7 +352,12 @@ class ParserLayerTests(unittest.TestCase):
         """
 
         result = self.parser.parse(source)
-        self.assertEqual(result["dependencies"], {"copybooks": ["CUSTOMER-REC"], "files": [], "file_bindings": {}, "external_calls": []})
+        self.assertEqual(
+            result["dependencies"]["copybooks"],
+            ["CUSTOMER-REC"],
+        )
+        self.assertEqual(result["dependencies"]["files"], [])
+        self.assertEqual(result["dependencies"]["file_kinds"], {})
 
     def test_redefines_and_occurs(self):
         source = """
@@ -334,7 +372,7 @@ class ParserLayerTests(unittest.TestCase):
         """
 
         result = self.parser.parse(source)
-        symbols = {item["name"]: item for item in result["symbol_table"]}
+        symbols = {item["name"]: item for item in result["symbol_table_entries"]}
 
         self.assertEqual(symbols["CUSTOMER-DATA"]["kind"], "group")
         self.assertEqual(symbols["RAW-DATA"]["kind"], "redefines")
@@ -410,6 +448,43 @@ class ParserLayerTests(unittest.TestCase):
         move_ops = [op for op in result["operations"] if op["type"] == "MOVE"]
         self.assertTrue(any(op["value"] == "HELLO" and op["target"] == "WS-TEXT" for op in move_ops))
 
+    def test_parser_accepts_sd_for_sort_files(self):
+        src = """
+           IDENTIFICATION DIVISION.
+           PROGRAM-ID. TESTSORT.
+           ENVIRONMENT DIVISION.
+           INPUT-OUTPUT SECTION.
+           FILE-CONTROL.
+               SELECT SORT-WORK ASSIGN TO "SORTWK.dat".
+           DATA DIVISION.
+           FILE SECTION.
+           SD SORT-WORK.
+           01 SORT-REC.
+              05 SORT-KEY PIC 9(4).
+           WORKING-STORAGE SECTION.
+           PROCEDURE DIVISION.
+           MAIN.
+               SORT SORT-WORK ON ASCENDING KEY SORT-KEY
+                   INPUT PROCEDURE LOAD-INPUT
+                   OUTPUT PROCEDURE WRITE-OUTPUT.
+               STOP RUN.
+           LOAD-INPUT. EXIT.
+           WRITE-OUTPUT. EXIT.
+        """
+        result = self.parser.parse(src)
+        self.assertFalse(any("no matching FD" in e for e in result["errors"]))
+        self.assertFalse(any("no FD or SD entry" in e for e in result["preflight_errors"]))
+        self.assertTrue(
+            any(f["name"] == "SORT-WORK" and f["kind"] == "SD" for f in result["files"])
+        )
+        self.assertEqual(result["dependencies"]["file_kinds"].get("SORT-WORK"), "SD")
+        self.assertEqual(len(result["sorts"]), 1)
+        sort_op = result["sorts"][0]
+        self.assertEqual(sort_op["file"], "SORT-WORK")
+        self.assertEqual(sort_op["keys"][0]["direction"], "ASCENDING")
+        self.assertEqual(sort_op["input_procedure"]["from"], "LOAD-INPUT")
+        self.assertEqual(sort_op["output_procedure"]["from"], "WRITE-OUTPUT")
+
     def test_missing_fd_preflight_error_halts_parse(self):
         source = """
        ENVIRONMENT DIVISION.
@@ -425,7 +500,7 @@ class ParserLayerTests(unittest.TestCase):
 
         result = self.parser.parse(source)
         self.assertIn(
-            "FILE-CONTROL references INVENTORY-FILE but no matching FD entry was found.",
+            "FILE-CONTROL references INVENTORY-FILE but no FD or SD entry was found.",
             result["preflight_errors"],
         )
         self.assertEqual(result["operations"], [])
@@ -444,6 +519,121 @@ class ParserLayerTests(unittest.TestCase):
 
         result = self.parser.parse(source)
         self.assertIn("PERFORM VARYING uses undeclared index I.", result["preflight_errors"])
+
+    def test_fd_copy_record_key_resolved_from_copybook(self):
+        """RECORD KEY in SELECT must resolve against fields from COPY inside FD."""
+        src = """
+           IDENTIFICATION DIVISION.
+           PROGRAM-ID. TESTSCORE.
+           ENVIRONMENT DIVISION.
+           INPUT-OUTPUT SECTION.
+           FILE-CONTROL.
+               SELECT SCORE-FILE
+                   ASSIGN TO "SCORFILE.dat"
+                   ORGANIZATION IS INDEXED
+                   ACCESS MODE IS DYNAMIC
+                   RECORD KEY IS SCR-RESULT-ID
+                   FILE STATUS IS WS-SCR-FS.
+           DATA DIVISION.
+           FILE SECTION.
+           FD SCORE-FILE RECORD CONTAINS 229 CHARACTERS.
+           COPY SCORECOPY.
+           PROCEDURE DIVISION.
+               STOP RUN.
+        """
+        scorecopy = """
+       01 SCORE-RESULT.
+          05 SCR-RESULT-ID        PIC 9(12)     VALUE ZEROS.
+          05 SCR-LOAN-ID          PIC 9(10)     VALUE ZEROS.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            copy_dir = os.path.join(tmp, "copybooks")
+            os.makedirs(copy_dir)
+            with open(os.path.join(copy_dir, "SCORECOPY.cpy"), "w", encoding="utf-8") as handle:
+                handle.write(scorecopy)
+
+            prior = list(copybook_resolver.COPY_LIBRARY_CONFIG.get("default", []))
+            copybook_resolver.COPY_LIBRARY_CONFIG["default"] = [copy_dir] + prior
+            try:
+                result = self.parser.parse(src)
+            finally:
+                copybook_resolver.COPY_LIBRARY_CONFIG["default"] = prior
+
+        errors = list(result.get("preflight_errors") or []) + list(result.get("errors") or [])
+        self.assertFalse(
+            any("SCR-RESULT-ID" in e and "not defined" in e for e in errors),
+            errors,
+        )
+        self.assertFalse(
+            any("RECORD KEY SCR-RESULT-ID" in e for e in errors),
+            errors,
+        )
+        score_file = next(f for f in result["files"] if f["name"] == "SCORE-FILE")
+        field_names = {fld["name"] for fld in score_file["fields"]}
+        self.assertIn("SCR-RESULT-ID", field_names)
+        self.assertIn("SCORE-RESULT", field_names)
+
+    def test_record_key_missing_from_fd_copy_is_preflight_error(self):
+        src = """
+           ENVIRONMENT DIVISION.
+           INPUT-OUTPUT SECTION.
+           FILE-CONTROL.
+               SELECT SCORE-FILE
+                   ASSIGN TO "SCORFILE.dat"
+                   ORGANIZATION IS INDEXED
+                   RECORD KEY IS SCR-RESULT-ID.
+           DATA DIVISION.
+           FILE SECTION.
+           FD SCORE-FILE.
+           COPY SCORECOPY.
+           PROCEDURE DIVISION.
+               STOP RUN.
+        """
+        scorecopy = """
+       01 SCORE-RESULT.
+          05 SCR-OTHER-ID PIC 9(12).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            copy_dir = os.path.join(tmp, "copybooks")
+            os.makedirs(copy_dir)
+            with open(os.path.join(copy_dir, "SCORECOPY.cpy"), "w", encoding="utf-8") as handle:
+                handle.write(scorecopy)
+
+            prior = list(copybook_resolver.COPY_LIBRARY_CONFIG.get("default", []))
+            copybook_resolver.COPY_LIBRARY_CONFIG["default"] = [copy_dir] + prior
+            try:
+                result = self.parser.parse(src)
+            finally:
+                copybook_resolver.COPY_LIBRARY_CONFIG["default"] = prior
+
+        self.assertIn(
+            "RECORD KEY SCR-RESULT-ID for SCORE-FILE is not defined in FD record description.",
+            result["preflight_errors"],
+        )
+
+    def test_parser_recognizes_indexed_by(self):
+        src = """
+           IDENTIFICATION DIVISION.
+           PROGRAM-ID. TESTIDX.
+           DATA DIVISION.
+           WORKING-STORAGE SECTION.
+           01 WS-TABLE.
+              05 WS-ENTRY OCCURS 10 TIMES INDEXED BY MY-IDX.
+                 10 WS-VALUE PIC 9(4).
+           PROCEDURE DIVISION.
+           MAIN.
+               PERFORM VARYING MY-IDX FROM 1 BY 1 UNTIL MY-IDX > 10
+                   DISPLAY WS-VALUE(MY-IDX)
+               END-PERFORM.
+               STOP RUN.
+        """
+        result = self.parser.parse(src)
+        errors = list(result.get("preflight_errors") or []) + list(result.get("errors") or [])
+        self.assertFalse(any("undeclared index" in e for e in errors))
+        symbols = {s["name"]: s for s in result["symbol_table_entries"]}
+        self.assertEqual(symbols["MY-IDX"]["kind"], "index")
+        self.assertEqual(symbols["MY-IDX"]["parent_table"], "WS-ENTRY")
+        self.assertEqual(symbols["MY-IDX"]["occurs_count"], 10)
 
     def test_duplicate_data_names_are_preflight_errors(self):
         source = """

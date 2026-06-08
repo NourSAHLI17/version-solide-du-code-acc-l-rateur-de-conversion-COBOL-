@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test src/lib/testingAgentMock.test.ts src/lib/testingService.test.ts src/lib/testingRunPersistence.test.ts src/lib/testingRunPdfReport.test.ts src/lib/testingProjectPdfReport.test.ts src/app/testing/page.route.test.ts"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
     "jszip": "^3.10.1",
     "monaco-editor": "^0.55.1",
     "next": "16.2.4",

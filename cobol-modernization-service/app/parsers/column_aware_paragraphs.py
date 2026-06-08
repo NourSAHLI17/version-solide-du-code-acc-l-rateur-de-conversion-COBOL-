@@ -43,7 +43,8 @@ def extract_paragraph_bodies(source_code: str, paragraph_names: List[str]) -> Di
 
         if fixed_like and len(line) >= 7:
             indicator = line[6]
-            body = line[7:72] if len(line) > 72 else line[7:]
+            # Columns 8-72 only; 73-80 identification area is ignored.
+            body = line[7:72]
         else:
             stripped = line.lstrip()
             if stripped.startswith("*") or stripped.startswith("*>"):

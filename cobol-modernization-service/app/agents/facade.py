@@ -41,12 +41,15 @@ class ModernizationAgents:
         source_code: str,
         parser_output: dict,
         analysis_output: str,
+        *,
+        java_profile: str | None = None,
     ) -> Tuple[object, Dict[str, str]]:
         """Expose conversion prompt construction for tests and debugging."""
         return self.conversion_agent.build_conversion_prompt_input(
             source_code,
             parser_output,
             analysis_output,
+            java_profile=java_profile,
         )
 
     def _normalize_analysis_output(self, analysis_output: str) -> Dict[str, object]:
@@ -57,9 +60,15 @@ class ModernizationAgents:
         self,
         parser_output: Dict[str, object],
         analysis_output: Dict[str, object],
+        *,
+        java_profile: str | None = None,
     ) -> Dict[str, object]:
         """Compatibility proxy for tests and existing callers."""
-        return self.conversion_agent._default_conversion_config(parser_output, analysis_output)
+        return self.conversion_agent._default_conversion_config(
+            parser_output,
+            analysis_output,
+            java_profile=java_profile,
+        )
 
     def get_runtime_status(self) -> Dict[str, object]:
         """Expose conversion-agent runtime readiness for API status views."""

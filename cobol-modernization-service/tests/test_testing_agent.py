@@ -128,7 +128,7 @@ class TestOrchestratorIntegration:
         report = run_testing_agent(
             parser_output=parser_output,
             analysis_output={},
-            java_source="public class Test { }",
+            java_source="public class Test {\n    public static void main(String[] args) {\n        System.out.println(\"TEST\");\n    }\n}",
             cobol_source="",
         )
         assert "parser_tests" in report

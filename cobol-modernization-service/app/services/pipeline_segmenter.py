@@ -157,7 +157,9 @@ def segment_program(
     )
     para_order = parser_output.get("paragraphs", [])
     operations = parser_output.get("operations", [])
-    symbol_table = {s["name"]: s for s in parser_output.get("symbol_table", [])}
+    from app.services.symbol_table import resolve_symbol_entries
+
+    symbol_table = {s["name"]: s for s in resolve_symbol_entries(parser_output)}
 
     segments: list[dict] = []
     visited: set[str] = set()

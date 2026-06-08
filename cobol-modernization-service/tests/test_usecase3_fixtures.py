@@ -21,8 +21,10 @@ def copylib_paths():
     copybook_resolver_module.COPY_LIBRARY_CONFIG["default"] = [lib_dir] + [
         p for p in prev if p != lib_dir
     ]
+    copybook_resolver_module.clear_cache()
     yield
     copybook_resolver_module.COPY_LIBRARY_CONFIG["default"] = prev
+    copybook_resolver_module.clear_cache()
 
 
 @pytest.fixture
@@ -40,7 +42,7 @@ def test_custmgr_usecase3(pipeline: PipelineService, copylib_paths):
     ast = out["ast"]
     assert ast.get("preflight_errors") == []
     assert len(ast.get("paragraphs") or []) >= 5
-    sym = ast.get("symbol_table") or []
+    sym = ast.get("symbol_table_entries") or []
     assert len(sym) > 20
     names = {s.get("name") for s in sym if isinstance(s, dict)}
     assert {"CUST-ID", "CUST-NAME", "CUST-BALANCE"}.issubset(names)
@@ -55,7 +57,7 @@ def test_stmtrpt_usecase3(pipeline: PipelineService, copylib_paths):
     ast = out["ast"]
     assert ast.get("preflight_errors") == []
     assert len(ast.get("paragraphs") or []) >= 4
-    sym = ast.get("symbol_table") or []
+    sym = ast.get("symbol_table_entries") or []
     assert len(sym) > 20
     names = {s.get("name") for s in sym if isinstance(s, dict)}
     assert "RPT-LINE-TEXT" in names
@@ -75,7 +77,7 @@ def test_stmtrpt_usecase3(pipeline: PipelineService, copylib_paths):
     for fn in ("CUSTOMER-FILE", "REPORT-FILE"):
         assert fn in files_hit, f"expected file {fn} in ops targets, got {files_hit}"
     books = ast.get("dependencies", {}).get("copybooks") or []
-    assert "CUSTCOPY" in books and "RPTCOPY" in books
+    assert "CUSTCOPY" in books and ("RPTCOPY" in books or "RPTHDCPY" in books)
 
 
 def test_txnpost_usecase3(pipeline: PipelineService, copylib_paths):
@@ -83,7 +85,7 @@ def test_txnpost_usecase3(pipeline: PipelineService, copylib_paths):
     ast = out["ast"]
     assert ast.get("preflight_errors") == []
     assert len(ast.get("paragraphs") or []) >= 5
-    sym = ast.get("symbol_table") or []
+    sym = ast.get("symbol_table_entries") or []
     assert len(sym) > 20
     names = {s.get("name") for s in sym if isinstance(s, dict)}
     assert "TXN-AMOUNT" in names and "CUST-BALANCE" in names

@@ -1,163 +1,209 @@
-# COBOL Modernization with Generative AI
+# COBOL Modernizer — AI-powered COBOL to Java pipeline
 
-## Overview
+An end-to-end platform that modernizes legacy COBOL batch programs into production-ready
+**plain Java** (no Spring by default). The system parses COBOL with a hybrid deterministic
+parser, analyses business logic with an LLM-backed analysis agent, converts to Java using
+one of two generation modes, compiles and repairs output, verifies behavioral equivalence
+against GnuCOBOL execution, and surfaces results through a Next.js dashboard.
 
-This project defines a structured and reliable approach to COBOL modernization using Generative AI.
+---
 
-The goal is not simply to translate COBOL into a modern language such as Java. The goal is to preserve business behavior, maintain functional correctness, and produce systems that are trustworthy enough for enterprise use.
+## Project structure
 
-## Core Principle
-
-> Correctness is not about syntax. Correctness is about behavior.
-
-Successful modernization must ensure that the generated system behaves like the original system under real business conditions. Syntax conversion alone is not enough.
-
-## Problem Statement
-
-Traditional code conversion approaches often focus on line-by-line translation. That can produce compilable output, but it frequently fails to preserve:
-
-- business rules
-- execution intent
-- batch and job context
-- data dependencies
-- operational reliability
-
-Large language models can accelerate modernization, but raw prompt-based conversion introduces serious risks, including hallucinations, missing logic, and inconsistent output.
-
-## Proposed Approach
-
-This project uses a controlled pipeline that combines deterministic analysis with LLM-powered reasoning.
-
-Instead of sending raw COBOL directly to an LLM, the system:
-
-1. extracts structure using parsers
-2. extracts operational and business context from JCL and related artifacts
-3. performs analysis before conversion
-4. generates code through guided transformation
-5. validates the generated system against expected behavior
-
-This approach makes AI a constrained modernization component rather than an uncontrolled code generator.
-
-## Architecture Overview
-
-```text
-COBOL Input
--> Parser Layer
--> Context Extraction (JCL and dependencies)
--> Analysis Agent
--> Conversion Agent
--> Validation Layer
+```
+cobol/
+├── README.md                         ← this file
+├── RUN_GUIDE.md                      ← operator quickstart
+├── start_backend.bat                 ← launches cobol-modernization-service on port 8010
+├── start_frontend.bat                ← launches cobol-modernization-dashboard
+├── .vscode/
+│
+├── docs/
+│   ├── architecture/                 ← production architecture reference (EY review)
+│   │   ├── ARCHITECTURE_README.md    ← start here: doc index + component map
+│   │   ├── ARCH_00_SYSTEM_LOGIC.md
+│   │   ├── ARCH_02_PARSER_ANALYSIS_CONVERSION_LOGIC.md
+│   │   ├── ARCH_04_TESTING_VALIDATION_AND_DOWNLOAD_LOGIC.md
+│   │   ├── ARCH_05_FRONTEND_BACKEND_INTERACTION.md
+│   │   ├── SCHEMA_CONTRACTS.md
+│   │   ├── DEVELOPER_GUIDE.md
+│   │   └── … (layer specs, API contracts, diagrams)
+│   │
+│   └── dev-notes/                    ← internal iteration notes (not required for review)
+│
+├── cobol-modernization-service/      ← Python / FastAPI backend (active implementation)
+│   ├── app/
+│   │   ├── agents/                   ← AnalysisAgent, ConversionAgent
+│   │   ├── api/                      ← REST routes under /api
+│   │   ├── converters/               ← constrained generation, Java scaffolding
+│   │   ├── core/                     ← AppConfig, env loading
+│   │   ├── grammars/                 ← ANTLR Cobol85 grammar
+│   │   ├── models/                   ← Pydantic schemas
+│   │   ├── parsers/                  ← ParserLayer, HybridCobolParser, JCL, COPY
+│   │   ├── services/                 ← PipelineService, testing, behavioral diff, repairs
+│   │   └── validation/               ← ValidationService
+│   ├── tests/
+│   ├── scripts/
+│   ├── main.py                       ← uvicorn entry (app.main:app)
+│   └── requirements.txt
+│
+├── cobol-modernization-dashboard/    ← Next.js frontend
+│   ├── src/app/                      ← pages (Single File, Project Upload, Testing, …)
+│   ├── src/components/
+│   ├── src/lib/                      ← shared workspace persistence
+│   └── src/services/                 ← API client
+│
+├── cobol-modernization-ai/           ← design reference markdown only (no Python app/)
+│
+├── acme-bank-v3/                     ← ACME Bank COBOL test case (6 programs)
+│   ├── src/                          ← LOANEVAL, RISKSCOR, CALCFEE, CHKAML, RECOVRY, RPTMONTH
+│   ├── copybooks/
+│   ├── data/
+│   └── jcl/
+│
+├── grammars_v4_master/               ← ANTLR v4 grammar collection (reference)
+└── exported-assets/                  ← generated Java / compiled outputs from pipeline runs
 ```
 
-## Pipeline Components
+---
 
-### 1. Parser Layer
+## Documentation
 
-The parser layer converts COBOL source into a structured representation such as an abstract syntax tree or intermediate model.
+### For reviewers — start here
 
-Its role is to identify:
+| Document | Description |
+|---|---|
+| `docs/architecture/ARCHITECTURE_README.md` | Doc index, component map, pipeline approaches |
+| `docs/architecture/ARCH_00_SYSTEM_LOGIC.md` | Full system logic overview |
+| `docs/architecture/ARCH_02_PARSER_ANALYSIS_CONVERSION_LOGIC.md` | Parser, analysis, and both conversion modes |
+| `docs/architecture/ARCH_04_TESTING_VALIDATION_AND_DOWNLOAD_LOGIC.md` | Testing agent, behavioral diff, validation |
+| `docs/architecture/ARCH_05_FRONTEND_BACKEND_INTERACTION.md` | Frontend pages and API contract |
+| `docs/architecture/SCHEMA_CONTRACTS.md` | Data schemas and API contracts |
+| `docs/architecture/DEVELOPER_GUIDE.md` | Developer onboarding |
 
-- divisions, sections, and paragraphs
-- data definitions
-- control flow
-- file operations
-- copybooks and dependencies
+### Architecture reference (`docs/architecture/`)
 
-This provides a stable foundation for downstream reasoning and reduces ambiguity before any LLM interaction occurs.
+Production documents aligned with `cobol-modernization-service/`. They describe the
+staged pipeline: JCL parse → COPY resolve → hybrid COBOL parse → context enrichment →
+LLM analysis → Java conversion (whole-class or constrained) → compile/repair →
+behavioral testing → download.
 
-### 2. Context Extraction
+### Internal dev notes (`docs/dev-notes/`)
 
-COBOL programs rarely operate in isolation. JCL, batch flows, datasets, job steps, and execution dependencies often carry essential meaning.
+Fix series, improvement plans, prompts, and verification artifacts from development.
+Not required for architecture review.
 
-This layer captures:
+---
 
-- job execution context
-- input and output datasets
-- scheduling and sequencing information
-- program invocation relationships
-- environmental assumptions
+## Getting started
 
-Including this context helps preserve behavior that is not explicit in the COBOL source alone.
+### Prerequisites
 
-### 3. Analysis Agent
+| Tool | Version |
+|---|---|
+| Python | 3.11+ |
+| Node.js | 20+ |
+| GnuCOBOL | 3.1+ |
+| OpenJDK | 21 |
+| LLM provider | Anthropic, OpenAI, OpenRouter, or Google (via env keys) |
 
-The analysis agent uses structured code and extracted context to infer business intent, identify transformation requirements, and produce a controlled modernization plan.
+### Start the backend
 
-Typical outputs may include:
+```bat
+start_backend.bat
+```
 
-- business rule summaries
-- dependency maps
-- control-flow interpretation
-- data movement analysis
-- risk annotations for ambiguous logic
+Or manually:
 
-This step separates understanding from generation.
+```bash
+cd cobol-modernization-service
+pip install -r requirements.txt
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
+```
 
-### 4. Conversion Agent
+API: `http://localhost:8010` — Swagger UI at `http://localhost:8010/docs`.
 
-The conversion agent transforms the analyzed representation into a target implementation such as Java.
+### Start the frontend
 
-Rather than free-form generation, it works from:
+```bat
+start_frontend.bat
+```
 
-- parsed structure
-- inferred business meaning
-- explicit transformation rules
-- target architecture constraints
+Or manually:
 
-This guided conversion model improves consistency and reduces LLM drift.
+```bash
+cd cobol-modernization-dashboard
+npm install
+npm run dev
+```
 
-### 5. Validation Layer
+Dashboard: `http://localhost:3000`.
 
-Validation is the critical control point of the system.
+### Environment configuration
 
-The generated output must be checked for behavioral equivalence, not just syntactic correctness. Validation may include:
+Copy `.env.example` to `.env` in `cobol-modernization-service/` and set at least one
+LLM provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or
+`GOOGLE_API_KEY`). Key runtime settings:
 
-- test-case generation from legacy behavior
-- record-level input/output comparison
-- control-flow consistency checks
-- business rule verification
-- regression testing against known workloads
+| Variable | Default | Purpose |
+|---|---|---|
+| `PARSER_BACKEND` | `hybrid` | `heuristic`, `hybrid`, or `antlr` |
+| `ANALYSIS_ENGINE` | `llm` | `llm` or `deterministic` |
+| `JAVA_PROJECT_PROFILE` | `plain_java` | Target Java style (`plain_java`, `spring_boot`, …) |
+| `LLM_PROVIDER` | `auto` | Provider selection |
 
-This is the layer that turns conversion into trustworthy modernization.
+---
 
-## Key Innovation
+## Use cases
 
-The main innovation of this project is the separation of modernization into distinct stages:
+### ACME Bank v3 — batch loan evaluation system
 
-1. structural extraction
-2. contextual understanding
-3. guided generation
-4. behavioral validation
+Located in `acme-bank-v3/`. Six COBOL programs:
 
-This design reduces hallucinations and increases reliability because the model is not asked to infer everything from raw source code in a single step.
+| Program | Function |
+|---|---|
+| `LOANEVAL` | Main loan evaluation controller |
+| `RISKSCOR` | Risk scoring engine |
+| `CALCFEE` | Fee calculation |
+| `CHKAML` | AML / sanctions check |
+| `RECOVRY` | Recovery processing |
+| `RPTMONTH` | Monthly reporting |
 
-## Benefits
+726 input records across flat files. Full pipeline regression baseline: parse → analyse →
+convert (constrained mode) → compile → behavioural diff.
 
-- Reduced hallucinations during code generation
-- Better preservation of business logic
-- Improved consistency across converted components
-- Clearer traceability from source behavior to generated output
-- Stronger validation and higher confidence in production readiness
-- Better alignment with enterprise modernization requirements
+### AUTOPREM — auto insurance premium calculation
 
-## Why This Matters
+Single-file COBOL with complex arithmetic precision. Targeted test for BigDecimal repair
+and field-name consistency in Java output.
 
-Enterprise COBOL systems often support critical operations in banking, insurance, government, and logistics. In these environments, even small behavioral differences can create major business risk.
+---
 
-A modernization approach based on parsing, contextual analysis, controlled generation, and validation is more realistic than direct code translation alone. It recognizes that legacy transformation is a software assurance problem, not only a code generation problem.
+## Architecture summary
 
-## Future Directions
+```mermaid
+flowchart TD
+    A[COBOL / JCL / ZIP project] --> B[JCL parser]
+    B --> C[COPY resolver]
+    C --> D[Hybrid COBOL parser]
+    D --> E[Context enricher]
+    E --> F[Analysis agent]
+    F --> G{Conversion mode}
+    G -->|small program| H[Whole-class LLM]
+    G -->|large / ACME| I[Constrained F45: scaffold + per-paragraph LLM]
+    H --> J[javac + repair loop]
+    I --> J
+    J --> K[Behavioural diff vs GnuCOBOL]
+    K --> L[Dashboard + download .zip]
+```
 
-Potential next steps for this project include:
-
-- defining an intermediate representation for modernization
-- adding automated test extraction from legacy execution traces
-- supporting multiple target languages beyond Java
-- integrating human review loops for high-risk transformations
-- measuring equivalence with domain-specific validation metrics
-
-## Conclusion
-
-COBOL modernization with Generative AI becomes significantly more reliable when AI is placed inside a structured engineering workflow.
-
-By combining parser-driven structure, contextual extraction, analysis agents, conversion agents, and validation controls, this project aims to modernize legacy systems while preserving the behaviors that matter most.
+| Stage | Component | Location |
+|---|---|---|
+| Orchestration | `PipelineService` | `app/services/pipeline_service.py` |
+| Parser (default) | `HybridCobolParser` | `app/parsers/hybrid_parser.py` |
+| Heuristic core | `ParserLayer` | `app/parsers/cobol_parser.py` |
+| Analysis | `AnalysisAgent` | `app/agents/analysis_agent.py` |
+| Conversion | `ConversionAgent` | `app/agents/conversion_agent.py` |
+| Constrained mode | `run_constrained_generation` | `app/converters/constrained_generation.py` |
+| Testing | `run_testing_agent`, `run_behavioral_diff` | `app/services/testing_agent.py`, `behavioral_diff_runner.py` |
+| Validation | `ValidationService` | `app/validation/service.py` |

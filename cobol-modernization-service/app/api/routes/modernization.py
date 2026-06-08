@@ -27,6 +27,12 @@ from app.api.schemas.requests import (
     TestRequest,
     ValidateRequest,
 )
+from app.services.analysis_cache import (
+    get_analysis_cache_key,
+    load_analysis_cache,
+    save_analysis_cache,
+)
+from app.agents.conversion_agent import ConversionAgent
 from app.services.pipeline_service import PipelineService
 from app.services.testing_agent import run_testing_agent
 
@@ -61,7 +67,8 @@ def _ensure_parser_output_dict(raw: object) -> dict:
 async def parse_cobol(request: CobolRequest):
     """Parse COBOL source code through the deterministic parser layer."""
     try:
-        return service.parse_cobol(request.source_code)
+        raw = service.parse_cobol(request.source_code)
+        return ConversionAgent._parser_output_json_safe(raw)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -77,32 +84,47 @@ async def analyze_cobol(request: AnalyzeRequest):
             else "unknown",
         )
         po = request.parser_output if isinstance(request.parser_output, dict) else {}
-        program_name = po.get("program_name")
+        program_name = str(po.get("program_name") or "unknown")
         src_h = _api_source_hash8(request.source_code)
-        print(f"[API] analysis request for program_name={program_name!r}")
-        print(
-            "[API] returning cached=False "
-            "(no HTTP/file cache; optional in-proc memo only if ANALYSIS_ENABLE_ANALYSIS_CACHE=1)",
-        )
-        print(f"[API] source_hash={src_h}")
         parser_out = _ensure_parser_output_dict(request.parser_output)
-        return service.analyze_cobol(request.source_code, parser_out)
-    except Exception:
-        logger.error("ANALYZE ERROR: %s", traceback.format_exc())
+        cache_key = get_analysis_cache_key(program_name, request.source_code)
+        if not request.force_refresh:
+            cached_analysis = load_analysis_cache(cache_key)
+            if cached_analysis:
+                print(
+                    f"[CACHE] Analysis exists for {program_name} (key={cache_key})",
+                    flush=True,
+                )
+                print(f"[API] source_hash={src_h} returning cached=True", flush=True)
+                return cached_analysis
+        print(f"[API] analysis request for program_name={program_name!r}", flush=True)
+        print(f"[API] source_hash={src_h} returning cached=False", flush=True)
+        print(
+            "[LIVE ANALYZE] HTTP chain: POST /api/analyze -> "
+            "PipelineService.analyze_cobol -> ModernizationAgents.analyze -> AnalysisAgent.analyze",
+            flush=True,
+        )
+        result = service.analyze_cobol(request.source_code, parser_out)
+        if isinstance(result, dict):
+            save_analysis_cache(cache_key, result)
+        return result
+    except HTTPException:
         raise
+    except Exception as exc:
+        logger.error("ANALYZE ERROR: %s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(exc) or "Analysis failed") from exc
 
 
 @router.post("/convert")
 async def convert_cobol(request: ConvertRequest):
     """Convert analyzed COBOL into Java code."""
-    try:
-        return service.convert_cobol(
-            request.source_code,
-            request.parser_output,
-            request.analysis_output,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # convert_cobol_async always returns JSON (partial/failed/complete); never HTTP 500.
+    return await service.convert_cobol_async(
+        request.source_code,
+        request.parser_output,
+        request.analysis_output,
+        java_profile=request.java_profile,
+    )
 
 
 @router.post("/validate")
@@ -192,6 +214,7 @@ async def smart_convert(request: SmartConvertRequest):
             request.source_code,
             request.parser_output,
             request.analysis_output,
+            java_profile=request.java_profile,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -221,6 +244,7 @@ async def run_pipeline_mode(request: PipelineModeRequest):
             request.mode,
             request.parser_output,
             request.analysis_output,
+            java_profile=request.java_profile,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -274,7 +298,11 @@ async def run_project_pipeline(request: ProjectPipelineRequest):
     Output: { "results": [...], "total_files": N }
     """
     try:
-        return service.run_project_pipeline(request.files, request.mode)
+        return await service.run_project_pipeline_async(
+            request.files,
+            request.mode,
+            java_profile=request.java_profile,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -297,18 +325,7 @@ async def download_java(request: DownloadJavaRequest):
 @router.post("/download/project")
 async def download_project(request: DownloadProjectRequest):
     """Download all converted Java files as ZIP."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for r in request.results:
-            if r.get("java_source"):
-                filename = Path(r.get("file", "output")).stem + ".java"
-                zf.writestr(f"src/main/java/{filename}", r["java_source"])
-            if r.get("test_report"):
-                filename = Path(r.get("file", "output")).stem + "_test_report.json"
-                zf.writestr(
-                    f"reports/{filename}",
-                    json.dumps(r["test_report"], indent=2),
-                )
+    buf = io.BytesIO(service.build_download_zip_from_results(request.results))
     buf.seek(0)
     return StreamingResponse(
         buf,
@@ -317,6 +334,34 @@ async def download_project(request: DownloadProjectRequest):
             "Content-Disposition": 'attachment; filename="converted_project.zip"'
         },
     )
+
+
+# ── Smoke Tests ──────────────────────────────────────────────────────────────
+
+@router.post("/smoke-test")
+async def run_smoke_test_endpoint(request: dict):
+    """Run a smoke test on converted Java code."""
+    from app.services.smoke_test_runner import run_smoke_test
+
+    java_code = request.get("java_code") or ""
+    program_name = request.get("program_name") or "Program"
+    parser_output = request.get("parser_output") or {}
+    save_baseline = bool(request.get("save_as_baseline", False))
+
+    if not java_code.strip():
+        raise HTTPException(status_code=400, detail="java_code is required")
+
+    try:
+        result = run_smoke_test(
+            java_code,
+            program_name=program_name,
+            parser_output=parser_output,
+            save_as_baseline=save_baseline,
+        )
+        return result.to_dict()
+    except Exception as exc:
+        logger.error("Smoke test error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ── Backend Status ────────────────────────────────────────────────────────────

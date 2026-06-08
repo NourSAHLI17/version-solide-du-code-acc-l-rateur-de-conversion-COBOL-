@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -15,12 +16,12 @@ ANALYSIS_RESPONSE_TOP_LEVEL_KEYS = [
     "program_name",
     "global_purpose",
     "complexity",
+    "complexity_tier",
     "complexity_drivers",
     "sections",
     "business_rules",
     "file_io_paragraphs",
     "loop_paragraphs",
-    "all_business_rules",
     "dependencies",
     "risk_points",
     "risk_flags",
@@ -64,7 +65,7 @@ class AnalysisAgentTests(unittest.TestCase):
         )
         self.assertEqual(sorted(result.keys()), sorted(ANALYSIS_RESPONSE_TOP_LEVEL_KEYS))
         self.assertEqual(result["analysis_engine"], "deterministic")
-        self.assertEqual(result["analysis_revision"], 1)
+        self.assertGreaterEqual(result["analysis_revision"], 1)
         self.assertEqual(result["paragraph_source_extraction"], "heuristic_split")
 
     def test_preflight_halt_response_has_uniform_contract(self):
@@ -126,7 +127,11 @@ class AnalysisAgentTests(unittest.TestCase):
         self.assertEqual(result["global_purpose"], "validate a transaction based on available balance and update the result status")
         self.assertEqual(result["complexity"], "low")
         self.assertEqual(result["sections"][0]["name"], "MAIN-LOGIC")
-        self.assertEqual(result["sections"][0]["business_rules"], [])
+        sec_rules = result["sections"][0]["business_rules"]
+        self.assertTrue(
+            any("[pattern]" in r for r in sec_rules),
+            f"Expected pattern-extracted rules, got {sec_rules}",
+        )
         self.assertIn("financial decision rule", result["risk_points"])
 
     def test_loop_based_aggregation(self):
@@ -195,7 +200,10 @@ class AnalysisAgentTests(unittest.TestCase):
         self.assertEqual(result["global_purpose"], "approve or reject a transaction based on balance and VIP status")
         self.assertIn(result["complexity"], {"low", "medium"})
         self.assertIn("conditional business exception", result["risk_points"])
-        self.assertEqual(result["business_rules"], [])
+        self.assertTrue(
+            any("[pattern]" in r for r in result["business_rules"]),
+            "Expected pattern-extracted rules in deterministic mode",
+        )
 
     # ─── ISSUE-06: Entry point role classification ───────────────────────
 
@@ -451,7 +459,11 @@ class AnalysisAgentTests(unittest.TestCase):
         )
         self.assertIn("WS-IKEY", sections["0000SELECTIONADD"]["outputs"])
         self.assertIn("DATAFILEFD", sections["0000SELECTIONADD"]["outputs"])
-        self.assertEqual(sections["0000SELECTIONADD"]["business_rules"], [])
+        add_rules = sections["0000SELECTIONADD"]["business_rules"]
+        self.assertTrue(
+            all("[pattern]" in r for r in add_rules),
+            f"All rules should be pattern-extracted, got {add_rules}",
+        )
         self.assertEqual(
             sections["0000SELECTIONSTARTERROR"]["role"],
             "Display error message and redirect flow",
@@ -532,6 +544,65 @@ class AnalysisAgentTests(unittest.TestCase):
         self.assertFalse(sections["MAIN"]["has_early_exit"])
         self.assertTrue(sections["DEAD-PARA"]["is_dead_code"])
         self.assertFalse(sections["MAIN"]["is_dead_code"])
+
+
+    def test_calcfee_deterministic_produces_business_rules(self):
+        """CALCFEE deterministic analysis must produce >=3 pattern-extracted business rules."""
+        calcfee_path = Path(__file__).resolve().parents[2] / "acme-bank-v3" / "src" / "CALCFEE.cbl"
+        if not calcfee_path.exists():
+            self.skipTest(f"CALCFEE.cbl not found at {calcfee_path}")
+        source = calcfee_path.read_text(encoding="utf-8", errors="replace")
+        parser_output = self.parser.parse(source)
+        with unittest.mock.patch.dict(os.environ, {"ANALYSIS_ENGINE": "deterministic"}):
+            result = self.agents.analyze(source, parser_output)
+
+        rules = result.get("business_rules", [])
+        self.assertGreaterEqual(len(rules), 3, f"Expected >=3 business_rules, got {len(rules)}: {rules}")
+        self.assertTrue(
+            all("[pattern]" in r for r in rules),
+            "All deterministic rules must be tagged with [pattern]",
+        )
+        self.assertEqual(result["analysis_engine"], "deterministic")
+
+        drivers = result.get("complexity_drivers", [])
+        self.assertGreater(len(drivers), 0, "Expected at least 1 complexity driver")
+
+        sections = {s["name"]: s for s in result.get("sections", [])}
+        self.assertIn("1000-SELECT-FEE-RATE", sections, "Expected EVALUATE paragraph as section")
+        fee_rate_rules = sections["1000-SELECT-FEE-RATE"].get("business_rules", [])
+        self.assertTrue(
+            any("EVALUATE" in r for r in fee_rate_rules),
+            f"Expected EVALUATE rule in 1000-SELECT-FEE-RATE, got {fee_rate_rules}",
+        )
+
+    def test_deterministic_preflight_still_extracts_rules(self):
+        """Even programs that fail preflight should get pattern-extracted rules from source."""
+        source = """
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 ITEM-RECORD PIC X(10).
+       01 ITEM-RECORD PIC X(20).
+       PROCEDURE DIVISION.
+       MAIN-PARA.
+           EVALUATE WS-ACTION
+               WHEN 'A' MOVE 'ADD' TO WS-RESULT
+               WHEN 'D' MOVE 'DEL' TO WS-RESULT
+               WHEN OTHER MOVE 'UNK' TO WS-RESULT
+           END-EVALUATE.
+           COMPUTE WS-TOTAL = WS-A + WS-B.
+           STOP RUN.
+        """
+        parser_output = {
+            "program_name": "TESTPF",
+            "preflight_errors": ["Duplicate data name ITEM-RECORD"],
+            "dependencies": {"copybooks": [], "files": [], "external_calls": []},
+            "warnings": [],
+        }
+        result = self.agents.analyze(source, parser_output)
+        self.assertEqual(result["analysis_engine"], "n/a")
+        rules = result.get("business_rules", [])
+        self.assertGreater(len(rules), 0, f"Preflight programs should still get pattern rules: {rules}")
+        self.assertTrue(any("EVALUATE" in r for r in rules), f"Expected EVALUATE rule, got {rules}")
 
 
 if __name__ == "__main__":

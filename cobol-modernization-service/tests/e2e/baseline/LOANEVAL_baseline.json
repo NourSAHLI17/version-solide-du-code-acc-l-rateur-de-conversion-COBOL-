@@ -1,0 +1,36 @@
+{
+    "program": "LOANEVAL",
+    "stdout_md5": "e66f1561e101eaf7ead9d208abdda625",
+    "stdout_lines": 7,
+    "exit_code": 4,
+    "generated_files": {
+        "DECIRPT.dat": {
+            "md5": "a0ba0dfa8dd808789a9610ddeeb47ba0",
+            "size_bytes": 86721,
+            "record_count": 633
+        },
+        "EVALREJ.dat": {
+            "md5": "97963680b8f511ecfe7fc981c55f1e4c",
+            "size_bytes": 23760
+        },
+        "RECVNEW.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        },
+        "SCORFILE.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        }
+    },
+    "key_metrics": {
+        "read_count": 800,
+        "approved_count": 454,
+        "conditional_count": 102,
+        "declined_count": 170,
+        "errors_count": 74
+    },
+    "cobol_compiler": "cobc (GnuCOBOL) 3.3-dev.0",
+    "captured_at": "2026-05-31T20:32:32.217673+00:00"
+}

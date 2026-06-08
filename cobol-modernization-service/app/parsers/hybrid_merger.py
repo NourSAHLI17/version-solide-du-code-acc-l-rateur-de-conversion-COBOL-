@@ -15,6 +15,7 @@ class HybridMerger:
         *,
         antlr_syntax_ok: bool,
     ) -> Dict[str, object]:
+        # Heuristic output is the baseline; ANTLR fragments are additive (deduped), never a full replacement.
         out: Dict[str, object] = dict(heuristic)
 
         h_ops = list(out.get("operations") or [])

@@ -1,0 +1,37 @@
+{
+  "status": "failed",
+  "qscore": 48,
+  "diag": {
+    "target_type": "project",
+    "program_name": "acme-bank-v3",
+    "run_id": "g1-verify-run",
+    "created_at": "2026-05-31T00:38:41.986991+00:00",
+    "behavioral_status": "failed",
+    "execution_mode": "live",
+    "cobol_execution_status": "runtime_failure",
+    "java_execution_status": "runtime_failure",
+    "cobol_compile_status": "ok",
+    "java_compile_status": "ok",
+    "cobol_runtime_status": "failed",
+    "java_runtime_status": "failed",
+    "stdout_diff_percentage": 47.62,
+    "first_mismatch_line": 5,
+    "lines_compared": 42,
+    "lines_matched": 22,
+    "lines_diverged": 20,
+    "failure_reason": "Project behavioral drift: 4 file(s) with mismatches of 6 tested (0 skipped). Aggregate diff 47.62%. Retry scopes: src/RECOVRY.cbl: 0000-MAIN; src/RPTMONTH.cbl: 0000-MAIN.",
+    "affected_paragraphs": [
+      "0000-MAIN"
+    ],
+    "retry_scope": "src/RECOVRY.cbl: 0000-MAIN; src/RPTMONTH.cbl: 0000-MAIN",
+    "infrastructure_blocker": false,
+    "testing_blocker_category": "conversion_runtime",
+    "layers_applicable": {
+      "compile_health": true,
+      "runtime_health": true,
+      "behavioral_parity": false,
+      "retry_stability": true,
+      "attribution_confidence": true
+    }
+  }
+}

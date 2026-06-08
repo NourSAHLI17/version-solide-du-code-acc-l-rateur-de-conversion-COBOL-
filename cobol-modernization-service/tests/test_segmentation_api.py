@@ -60,7 +60,7 @@ class SegmentationAPITests(unittest.TestCase):
                 "operations": []
             },
             "analysis_output": {},
-            "java_source": "public class Test {}",
+            "java_source": "public class Test {\n    public static void main(String[] args) {\n        System.out.println(\"TEST\");\n    }\n}",
             "cobol_source": ""
         }
         response = self.client.post("/api/test", json=payload)

@@ -78,7 +78,7 @@ export default function CockpitPage() {
       actions.setParserResult(parserResult);
       const analysisResult = workspace.analysisResult ?? (await analyzeCobol(workspace.sourceCode, parserResult));
       actions.setAnalysisResult(analysisResult);
-      const javaCode = await convertCobol(workspace.sourceCode, parserResult, analysisResult);
+      const { javaCode } = await convertCobol(workspace.sourceCode, parserResult, analysisResult);
       actions.setJavaCode(javaCode);
       setLastConversionWorked(true);
     } catch (caught) {
@@ -112,7 +112,7 @@ export default function CockpitPage() {
       actions.setParserResult(parserResult);
       const analysisResult = await analyzeCobol(workspace.sourceCode, parserResult);
       actions.setAnalysisResult(analysisResult);
-      const javaCode = await convertCobol(workspace.sourceCode, parserResult, analysisResult);
+      const { javaCode } = await convertCobol(workspace.sourceCode, parserResult, analysisResult);
       actions.setJavaCode(javaCode);
       const validationResult = await validateOutputs(workspace.expectedOutput, workspace.actualOutput);
       actions.setValidationResult(validationResult);

@@ -1,0 +1,47 @@
+{
+    "program": "CALCFEE",
+    "test_cases": [
+        {
+            "name": "consumer_standard",
+            "input": {
+                "loan_type": "CON",
+                "amount": "100000.00",
+                "rate": "12.5000"
+            },
+            "expected_output": {
+                "file_fee": "1500.00",
+                "tax": "290.00",
+                "insurance": "450.00",
+                "total": "2240.00"
+            }
+        },
+        {
+            "name": "mortgage_at_cap",
+            "input": {
+                "loan_type": "IMM",
+                "amount": "500000.00",
+                "rate": "9.2500"
+            },
+            "expected_output": {
+                "file_fee": "5000.00",
+                "tax": "955.00",
+                "insurance": "2250.00",
+                "total": "8205.00"
+            }
+        },
+        {
+            "name": "business_min_fee",
+            "input": {
+                "loan_type": "PRO",
+                "amount": "1000.00",
+                "rate": "8.0000"
+            },
+            "expected_output": {
+                "file_fee": "50.00",
+                "tax": "14.50",
+                "insurance": "0.00",
+                "total": "64.50"
+            }
+        }
+    ]
+}

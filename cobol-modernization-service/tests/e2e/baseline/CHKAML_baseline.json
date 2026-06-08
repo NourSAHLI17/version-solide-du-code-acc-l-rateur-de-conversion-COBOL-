@@ -1,0 +1,37 @@
+{
+    "program": "CHKAML",
+    "test_cases": [
+        {
+            "name": "clean_client",
+            "input": {
+                "cust_id": 10000001,
+                "cin": "88776655",
+                "name": "BENSALAH AHMED",
+                "dob": 19850515,
+                "nationality": "TUN",
+                "amount": "5000.00"
+            },
+            "expected_output": {
+                "clear": "Y",
+                "score": 0,
+                "reason": "AML CLEAR"
+            }
+        },
+        {
+            "name": "pep_hit",
+            "input": {
+                "cust_id": 10000002,
+                "name": "MOHAMED TRABELSI",
+                "dob": 19700101,
+                "nationality": "TUN",
+                "cin": "00000000",
+                "amount": "5000.00"
+            },
+            "expected_output": {
+                "clear": "Y",
+                "score": 50,
+                "reason": "AML CLEAR"
+            }
+        }
+    ]
+}

@@ -31,7 +31,7 @@ def payroll_parse(payroll_src: str) -> dict:
 
 class TestStep01ParserFixes:
     def test_ws_tax_rate_is_bigdecimal(self, payroll_parse: dict) -> None:
-        sym = next(s for s in payroll_parse["symbol_table"] if s["name"] == "WS-TAX-RATE")
+        sym = next(s for s in payroll_parse["symbol_table_entries"] if s["name"] == "WS-TAX-RATE")
         pd = sym["pic_decoded"]
         assert pd["java_type"] == "BigDecimal"
         assert pd["dec_digits"] == 4

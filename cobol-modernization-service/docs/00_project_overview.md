@@ -34,7 +34,11 @@ All public backend endpoints therefore live under `/api`.
 | Google key | `GOOGLE_API_KEY` | `None` |
 | OpenAI key | `OPENAI_API_KEY` | `None` |
 | OpenRouter key | `OPENROUTER_API_KEY` | `None` |
-| LLM provider | `LLM_PROVIDER` | `auto` |
+| Anthropic key | `ANTHROPIC_API_KEY` | `None` |
+| LLM provider | `LLM_PROVIDER` | `auto` (`anthropic`, `openai`, `openrouter`, `google`) |
+| Anthropic project default | `DEFAULT_ANTHROPIC_MODEL` in `app/services/llm_config.py` | `claude-sonnet-4-5` |
+| Anthropic analysis model | `ANTHROPIC_MODEL_ANALYSIS` / `ANTHROPIC_MODEL` | `claude-sonnet-4-5` |
+| Anthropic conversion model | `ANTHROPIC_MODEL_CONVERSION` | same as analysis model |
 | OpenAI model | `OPENAI_MODEL` | `gpt-4.1-mini` |
 | OpenRouter model | `OPENROUTER_MODEL` | `openai/gpt-4o-mini` |
 | Parser backend | `PARSER_BACKEND` | `heuristic` |

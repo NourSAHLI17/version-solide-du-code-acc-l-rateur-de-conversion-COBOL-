@@ -1,0 +1,28 @@
+{
+    "normalize_whitespace": true,
+    "stdout_tolerance": {
+        "default_numeric_tolerance_pct": 0.001,
+        "exact_fields": [
+            "CLASS 1:",
+            "CLASS 2:",
+            "CLASS 3:",
+            "CLASS 4:"
+        ],
+        "tolerant_fields": {
+            "TOTAL PROV": 0.0001
+        },
+        "ignore_fields": [
+            "RUN TIMESTAMP",
+            "START 20",
+            "PAGE NUMBER",
+            "BATCH ID"
+        ]
+    },
+    "generated_files_tolerance": {
+        "BCTSUBM.dat": {
+            "ignore_byte_ranges": [[10, 18]],
+            "record_count_must_match": true,
+            "record_structure_must_match": true
+        }
+    }
+}

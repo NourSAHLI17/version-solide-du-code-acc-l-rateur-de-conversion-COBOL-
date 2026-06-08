@@ -1,0 +1,52 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SEEDTXNPOST.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT CUSTOMER-FILE
+               ASSIGN TO 'ACME.CUSTOMER.MASTER'
+               ORGANIZATION IS INDEXED
+               ACCESS MODE IS SEQUENTIAL
+               RECORD KEY IS CUST-ID
+               FILE STATUS IS WS-CUST-STATUS.
+           SELECT TRANSACTION-FILE
+               ASSIGN TO 'ACME.TRANSACTIONS'
+               ORGANIZATION IS SEQUENTIAL
+               FILE STATUS IS WS-TXN-STATUS.
+       DATA DIVISION.
+       FILE SECTION.
+       FD CUSTOMER-FILE.
+       01 CUSTOMER-RECORD.
+          05 CUST-ID             PIC X(10).
+          05 CUST-NAME           PIC X(30).
+          05 CUST-ADDRESS        PIC X(50).
+          05 CUST-BALANCE        PIC S9(9)V99 COMP-3.
+          05 CUST-STATUS         PIC X.
+       FD TRANSACTION-FILE.
+       01 TRANSACTION-RECORD.
+          05 TXN-ID              PIC X(10).
+          05 TXN-CUST-ID         PIC X(10).
+          05 TXN-TYPE            PIC X(2).
+          05 TXN-AMOUNT          PIC S9(7)V99 COMP-3.
+          05 TXN-DATE            PIC 9(8).
+       WORKING-STORAGE SECTION.
+       01 WS-CUST-STATUS        PIC XX.
+       01 WS-TXN-STATUS         PIC XX.
+       PROCEDURE DIVISION.
+           OPEN OUTPUT CUSTOMER-FILE.
+           MOVE 'CUST000001' TO CUST-ID.
+           MOVE 'Test Customer               ' TO CUST-NAME.
+           MOVE SPACES TO CUST-ADDRESS.
+           MOVE ZERO TO CUST-BALANCE.
+           MOVE 'A' TO CUST-STATUS.
+           WRITE CUSTOMER-RECORD.
+           CLOSE CUSTOMER-FILE.
+           OPEN OUTPUT TRANSACTION-FILE.
+           MOVE 'TXN0000001' TO TXN-ID.
+           MOVE 'CUST000001' TO TXN-CUST-ID.
+           MOVE 'CR' TO TXN-TYPE.
+           MOVE 100.00 TO TXN-AMOUNT.
+           MOVE 20260101 TO TXN-DATE.
+           WRITE TRANSACTION-RECORD.
+           CLOSE TRANSACTION-FILE.
+           STOP RUN.

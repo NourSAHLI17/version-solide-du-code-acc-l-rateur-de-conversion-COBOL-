@@ -9,11 +9,10 @@ from typing import Any, Dict, List
 
 class ValidationService:
     """
-    Compare expected and actual outputs using multiple validation strategies.
+    Compare expected vs actual *text/JSON* outputs (golden-file style).
 
-    The service preserves the pipeline concept of a dedicated validation layer
-    and goes beyond exact string equality by checking normalized text and
-    structured JSON equivalence when possible.
+    This is not behavioral verification — it does not compile or run COBOL/Java.
+    Runtime equivalence is handled by run_behavioral_diff() on POST /api/testing/behavioral-diff.
 
     Example:
         Input:

@@ -1,0 +1,138 @@
+//ACMEMNT  JOB (ACCT=9003,CLASS=B),
+//         'ACME BANK MONTHLY CREDIT BATCH V3',
+//         NOTIFY=&SYSUID,
+//         MSGLEVEL=(1,1),
+//         MSGCLASS=X,
+//         CLASS=B,
+//         REGION=512M
+//*
+//*===============================================================
+//* JOB:     ACMEMNT
+//* PURPOSE: ACME Bank Monthly Credit Batch - PRODUCTION v3
+//*          Step 1: LOANEVAL - Score and evaluate loans
+//*                  + Calls CHKAML, CALCFEE sub-programs
+//*                  + EXEC SQL to CREDITBUREAU, SECTOR_RISK
+//*          Step 2: RISKSCOR - BCT classification + provisions
+//*                  + EXEC SQL INSERT to PROD.RISK_HIST
+//*          Step 3: RECOVRY  - Generate recovery actions + letters
+//*                  + Internal SORT by priority
+//*          Step 4: RPTMONTH - Executive management report
+//*
+//* SCHED:   Last business day of each month
+//* CONTACT: Credit Risk - risk@acmebank.tn
+//* BCT:     Produces BCTSUBM.dat for quarterly BCT submission
+//*===============================================================
+//*
+//* STEP01 - Loan evaluation and scoring
+//* Requires CHKAML + CALCFEE loadlib + CREDITBUREAU SQL access
+//*
+//STEP01   EXEC PGM=LOANEVAL,
+//         COND=(0,NE),
+//         REGION=384M,
+//         TIME=120
+//STEPLIB  DD  DSN=ACME.PROD.CREDIT.LOADLIB,DISP=SHR
+//         DD  DSN=ACME.PROD.AML.LOADLIB,DISP=SHR
+//         DD  DSN=ACME.PROD.PRICING.LOADLIB,DISP=SHR
+//SYSLIB   DD  DSN=ACME.PROD.COPYLIB,DISP=SHR
+//LOANFILE DD  DSN=ACME.PROD.LOANS.MASTER,
+//             DISP=SHR,
+//             DCB=(RECFM=FB,LRECL=240,BLKSIZE=24000)
+//CUSTFILE DD  DSN=ACME.PROD.CUSTOMERS.MASTER,
+//             DISP=SHR,
+//             DCB=(RECFM=FB,LRECL=380,BLKSIZE=38000)
+//COLFILE  DD  DSN=ACME.PROD.COLLATERAL.MASTER,
+//             DISP=SHR,
+//             DCB=(RECFM=FB,LRECL=200,BLKSIZE=20000)
+//GUARFILE DD  DSN=ACME.PROD.GUARANTEES.MASTER,
+//             DISP=SHR,
+//             DCB=(RECFM=FB,LRECL=130,BLKSIZE=13000)
+//SANCFILE DD  DSN=ACME.PROD.AML.SANCTIONS,
+//             DISP=SHR,
+//             DCB=(RECFM=FB,LRECL=200,BLKSIZE=20000)
+//SCORFILE DD  DSN=ACME.PROD.SCORES.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(20,10)),
+//             DCB=(RECFM=FB,LRECL=260,BLKSIZE=26000)
+//DECIRPT  DD  DSN=ACME.PROD.REPORTS.DECISIONS.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(10,5)),
+//             DCB=(RECFM=FB,LRECL=137,BLKSIZE=13700)
+//EVALREJ  DD  DSN=ACME.PROD.LOGS.EVALREJ.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(2,1)),
+//             DCB=(RECFM=FB,LRECL=120,BLKSIZE=12000)
+//SORTWRK  DD  DSN=&&SORTWK,DISP=(NEW,DELETE,DELETE),
+//             SPACE=(CYL,(5,2)),UNIT=SYSDA
+//SYSOUT   DD  SYSOUT=*
+//SYSPRINT DD  SYSOUT=*
+//SYSIN    DD  DUMMY
+//*
+//* STEP02 - Portfolio risk classification + BCT submission
+//* Reads SCORFILE from STEP01. Updates LOAN-CLASS via REWRITE.
+//*
+//STEP02   EXEC PGM=RISKSCOR,
+//         COND=(8,LT,STEP01),
+//         REGION=256M
+//STEPLIB  DD  DSN=ACME.PROD.CREDIT.LOADLIB,DISP=SHR
+//SYSLIB   DD  DSN=ACME.PROD.COPYLIB,DISP=SHR
+//LOANFILE DD  DSN=ACME.PROD.LOANS.MASTER,DISP=SHR
+//CUSTFILE DD  DSN=ACME.PROD.CUSTOMERS.MASTER,DISP=SHR
+//SCORFILE DD  DSN=ACME.PROD.SCORES.&DATE,DISP=SHR
+//RECVNEW  DD  DSN=ACME.PROD.RECOV.PENDING,
+//             DISP=(MOD,KEEP,KEEP),
+//             SPACE=(CYL,(2,1))
+//RISKRPT  DD  DSN=ACME.PROD.REPORTS.RISK.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(10,5)),
+//             DCB=(RECFM=FB,LRECL=137,BLKSIZE=13700)
+//BCTSUBM  DD  DSN=ACME.PROD.BCT.SUBMISSION.&SYSDATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(20,10)),
+//             DCB=(RECFM=FB,LRECL=200,BLKSIZE=20000)
+//SYSOUT   DD  SYSOUT=*
+//SYSIN    DD  DUMMY
+//*
+//* STEP03 - Recovery action generation + dunning letters
+//*
+//STEP03   EXEC PGM=RECOVRY,
+//         COND=(8,LT,STEP02),
+//         REGION=384M
+//STEPLIB  DD  DSN=ACME.PROD.CREDIT.LOADLIB,DISP=SHR
+//SYSLIB   DD  DSN=ACME.PROD.COPYLIB,DISP=SHR
+//LOANFILE DD  DSN=ACME.PROD.LOANS.MASTER,DISP=SHR
+//CUSTFILE DD  DSN=ACME.PROD.CUSTOMERS.MASTER,DISP=SHR
+//COLFILE  DD  DSN=ACME.PROD.COLLATERAL.MASTER,DISP=SHR
+//RECVNEW  DD  DSN=ACME.PROD.RECOV.NEW.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(10,5)),
+//             DCB=(RECFM=FB,LRECL=260,BLKSIZE=26000)
+//LETTERS  DD  DSN=ACME.PROD.LETTERS.DUNNING.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(20,10)),
+//             DCB=(RECFM=FB,LRECL=137,BLKSIZE=13700)
+//ESCARPT  DD  DSN=ACME.PROD.REPORTS.RECOV.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(5,2)),
+//             DCB=(RECFM=FB,LRECL=137,BLKSIZE=13700)
+//SORTWK2  DD  DSN=&&SORTWK2,DISP=(NEW,DELETE,DELETE),
+//             SPACE=(CYL,(5,2)),UNIT=SYSDA
+//SYSOUT   DD  SYSOUT=*
+//SYSPRINT DD  SYSOUT=*
+//SYSIN    DD  DUMMY
+//*
+//* STEP04 - Executive monthly report
+//*
+//STEP04   EXEC PGM=RPTMONTH,
+//         COND=(8,LT,STEP02),
+//         REGION=128M
+//STEPLIB  DD  DSN=ACME.PROD.CREDIT.LOADLIB,DISP=SHR
+//SYSLIB   DD  DSN=ACME.PROD.COPYLIB,DISP=SHR
+//LOANFILE DD  DSN=ACME.PROD.LOANS.MASTER,DISP=SHR
+//CUSTFILE DD  DSN=ACME.PROD.CUSTOMERS.MASTER,DISP=SHR
+//SCORFILE DD  DSN=ACME.PROD.SCORES.&DATE,DISP=SHR
+//MONTHRPT DD  DSN=ACME.PROD.REPORTS.MONTHLY.&DATE,
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(15,5)),
+//             DCB=(RECFM=FB,LRECL=137,BLKSIZE=13700)
+//SYSOUT   DD  SYSOUT=*
+//SYSIN    DD  DUMMY

@@ -64,7 +64,20 @@ class ApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(convert_response.status_code, 200)
-        self.assertIn("java_code", convert_response.json())
+        conv_body = convert_response.json()
+        self.assertIn("java_code", conv_body)
+        self.assertIn("conversion_score", conv_body)
+        cs = conv_body["conversion_score"]
+        for key in (
+            "program_name",
+            "structural_score",
+            "business_rules_score",
+            "total_score",
+            "decision",
+            "summary",
+            "paragraph_breakdown",
+        ):
+            self.assertIn(key, cs)
 
     def test_validate_endpoint(self):
         response = self.client.post(
@@ -76,6 +89,39 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["is_equivalent"], False)
         self.assertEqual(body["comparison_mode"], "json_structure")
         self.assertIn("status: expected 'APPROVED', got 'REJECTED'", body["differences"])
+
+    def test_convert_structural_error_returns_json_not_500(self):
+        from app.services.java_pre_write_validator import StructuralStageError
+
+        source = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. DEMO.\n"
+        parser_output = {"program_name": "DEMO", "total_lines": 2}
+        analysis_output = json.dumps({"complexity": "low"})
+
+        def _raise_structural(*args, **kwargs):
+            raise StructuralStageError(
+                "stage_9_finalize",
+                ["Unbalanced braces: depth=1 at end of file"],
+            )
+
+        original = service._convert_cobol_impl
+        service._convert_cobol_impl = _raise_structural
+        try:
+            response = self.client.post(
+                "/api/convert",
+                json={
+                    "source_code": source,
+                    "parser_output": parser_output,
+                    "analysis_output": analysis_output,
+                },
+            )
+        finally:
+            service._convert_cobol_impl = original
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body.get("conversion_status"), "partial")
+        self.assertIn("error_detail", body)
+        self.assertIn("java_code", body)
 
     def test_status_endpoint(self):
         response = self.client.get("/api/status")

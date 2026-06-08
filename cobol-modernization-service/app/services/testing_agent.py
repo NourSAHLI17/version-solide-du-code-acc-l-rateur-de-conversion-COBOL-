@@ -32,7 +32,9 @@ def run_parser_tests(parser_output: dict) -> List[dict]:
     known_paras = set(parser_output.get("paragraphs", []))
 
     # Symbol table: every symbol has pic or kind
-    for sym in parser_output.get("symbol_table", []):
+    from app.services.symbol_table import resolve_symbol_entries
+
+    for sym in resolve_symbol_entries(parser_output):
         tests.append({
             "id": f"SYM_{sym['name']}",
             "description": f"Symbol '{sym['name']}' has pic and kind defined",
@@ -107,9 +109,11 @@ def run_conversion_tests(java_source: str, parser_output: dict) -> List[dict]:
     })
 
     # No float/double for decimal fields
+    from app.services.symbol_table import resolve_symbol_entries
+
     decimal_syms = [
         s["name"].replace("-", "_").lower()
-        for s in parser_output.get("symbol_table", [])
+        for s in resolve_symbol_entries(parser_output)
         if "V" in (s.get("pic") or "")
     ]
     if decimal_syms:
@@ -140,7 +144,9 @@ def run_conversion_tests(java_source: str, parser_output: dict) -> List[dict]:
         })
 
     # Array sizes match OCCURS
-    for sym in parser_output.get("symbol_table", []):
+    from app.services.symbol_table import resolve_symbol_entries
+
+    for sym in resolve_symbol_entries(parser_output):
         if sym.get("occurs"):
             expected = sym["occurs"]
             array_pattern = re.compile(
@@ -253,7 +259,9 @@ def run_behavioral_tests(java_source: str, cobol_source: str) -> List[dict]:
             class_match = re.search(r"public\s+class\s+(\w+)", java_source)
             class_name = class_match.group(1) if class_match else "Output"
             java_path = tmp / f"{class_name}.java"
-            java_path.write_text(java_source, encoding="utf-8")
+            from app.services.java_pre_write_validator import write_java_file
+
+            write_java_file(java_path, java_source)
             compile_result = subprocess.run(
                 ["javac", str(java_path)],
                 capture_output=True,
@@ -353,7 +361,7 @@ def run_testing_agent(
     java_source: str,
     cobol_source: str,
 ) -> dict:
-    """Run all three sub-generators and return a unified test report."""
+    """Lightweight static checks (regex + optional subprocess). For full runtime diff use behavioral-diff."""
     parser_tests = run_parser_tests(parser_output)
     conversion_tests = run_conversion_tests(java_source, parser_output)
     behavioral_tests = run_behavioral_tests(java_source, cobol_source)

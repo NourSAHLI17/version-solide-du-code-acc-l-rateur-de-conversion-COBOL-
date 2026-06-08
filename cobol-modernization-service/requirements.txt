@@ -5,6 +5,8 @@ langchain
 langchain-core
 langchain-google-genai
 httpx
+openai>=1.0.0
+anthropic>=0.40.0
 ruff
 javalang
 antlr4-python3-runtime

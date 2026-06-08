@@ -1,0 +1,56 @@
+{
+    "program": "RISKSCOR",
+    "stdout_md5": "a1d37cc7836634e2aa2969760552f5b9",
+    "stdout_lines": 6,
+    "exit_code": 0,
+    "generated_files": {
+        "BCTSUBM.dat": {
+            "md5": "a963627d5278edc9c7160448bc531247",
+            "size_bytes": 145200,
+            "record_count": 726
+        },
+        "DECIRPT.dat": {
+            "md5": "a0ba0dfa8dd808789a9610ddeeb47ba0",
+            "size_bytes": 86721,
+            "record_count": 633
+        },
+        "ESCARPT.dat": {
+            "md5": "2695ba5b2e1e62a2ced5bc8d3f13adca",
+            "size_bytes": 1918,
+            "record_count": 14
+        },
+        "EVALREJ.dat": {
+            "md5": "97963680b8f511ecfe7fc981c55f1e4c",
+            "size_bytes": 23760
+        },
+        "LETTERS.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        },
+        "RECVNEW.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        },
+        "RISKRPT.dat": {
+            "md5": "158882050eabfc49d8e8a34c3414f332",
+            "size_bytes": 1370,
+            "record_count": 10
+        },
+        "SCORFILE.dat": {
+            "md5": "d41d8cd98f00b204e9800998ecf8427e",
+            "size_bytes": 0,
+            "record_count": 0
+        }
+    },
+    "key_metrics": {
+        "CLASS_1_count": 726,
+        "CLASS_2_count": 0,
+        "CLASS_3_count": 0,
+        "CLASS_4_count": 0,
+        "TOTAL_PROVISION": "0.00"
+    },
+    "cobol_compiler": "cobc (GnuCOBOL) 3.3-dev.0",
+    "captured_at": "2026-05-31T20:32:32.217673+00:00"
+}

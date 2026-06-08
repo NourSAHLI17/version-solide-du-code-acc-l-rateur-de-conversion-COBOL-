@@ -92,9 +92,11 @@ def parse_with_hybrid(source_code: str) -> Dict[str, object]:
     from app.parsers.antlr_parser import AntlrCobolParser
 
     missing = AntlrCobolParser().missing_requirements()
+    # Heuristic parse always runs first — downstream stages need a stable contract even when ANTLR is absent.
     heuristic = ParserLayer().parse(source_code)
 
     if missing:
+        # Degraded: same heuristic JSON, flagged so callers know ANTLR enrichment did not run.
         out = dict(heuristic)
         out["parser_backend"] = "hybrid_degraded"
         out["hybrid_degraded_reason"] = "; ".join(missing)
@@ -105,6 +107,7 @@ def parse_with_hybrid(source_code: str) -> Dict[str, object]:
         return out
 
     tree, messages, ok, parse_exc = run_antlr_pass(source_code)
+    # Low-confidence ANTLR (syntax errors) still returns heuristic output; antlr_syntax_ok signals trust level.
     partial: Dict[str, Any] = {}
     if ok and tree is not None:
         adapter = CobolTreeAdapter()

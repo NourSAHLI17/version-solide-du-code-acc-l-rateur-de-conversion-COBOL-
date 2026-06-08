@@ -24,7 +24,22 @@ build/
 .DS_Store
 Thumbs.db
 
+# Java compiled output
+*.class
+*.jar
+
 # Project specific
 .agents/
 .antlr/
 antlr-*.jar
+
+# Temporary COBOL run directories
+tmp_loaneval_*/
+
+# Caches
+.analysis_cache/
+.conversion_cache/
+.run/
+
+# Database
+*.db

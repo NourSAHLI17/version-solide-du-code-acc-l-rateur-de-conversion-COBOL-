@@ -4,13 +4,15 @@ from app.services.aggregator import aggregate_segments, reconcile_type
 
 @pytest.fixture
 def base_parser_output():
+    entries = [
+        {"name": "SHARED-VAR", "value": "0"},
+        {"name": "STRING-VAR", "value": "'HELLO'"},
+        {"name": "LOCAL-VAR"},
+    ]
     return {
         "program_name": "TEST-PROGRAM",
-        "symbol_table": [
-            {"name": "SHARED-VAR", "value": "0"},
-            {"name": "STRING-VAR", "value": "'HELLO'"},
-            {"name": "LOCAL-VAR"}
-        ]
+        "symbol_table_entries": entries,
+        "symbol_table": entries,
     }
 
 
@@ -83,7 +85,7 @@ def test_cross_reference_validation_fails(base_parser_output):
 
 
 def test_aggregate_with_occurs(base_parser_output):
-    base_parser_output["symbol_table"].append({
+    base_parser_output["symbol_table_entries"].append({
         "name": "ARRAY-VAR", "occurs": 100, "value": "0"
     })
     segments = [

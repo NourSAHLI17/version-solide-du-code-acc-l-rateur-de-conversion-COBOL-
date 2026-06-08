@@ -1,19 +1,30 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import JSZip from "jszip";
 
+import FileTree from "@/components/FileTree";
 import JsonTreeViewer from "@/components/JsonTreeViewer";
 import MonacoCobolEditor from "@/components/MonacoCobolEditor";
 import MonacoJavaViewer from "@/components/MonacoJavaViewer";
+import RepairSummaryPanel from "@/components/RepairSummaryPanel";
+import ScoreCard from "@/components/ScoreCard";
+import SmokeTestPanel from "@/components/SmokeTestPanel";
+import { pipelineToConversionStatus } from "@/lib/repairSummary";
+import { complexityFromAnalyses, normalizeConversionScore, scoreListValue } from "@/lib/conversionScore";
 import { PROJECT_BOOTSTRAP_KEY } from "@/lib/bootstrapKeys";
-import { expandCopybooks, topologicalCobolOrder } from "@/lib/projectCopybooks";
+import { expandCopybooks } from "@/lib/projectCopybooks";
 import {
   PROJECT_WORKSPACE_KEY,
   classifyType,
+  getFileRetryCapabilities,
   loadProjectWorkspace,
   newProjectWorkspace,
+  programKeyFromEntry,
   saveProjectWorkspace,
+  verifyConversionProgram,
+  type ProjectRetryStep,
   type PipelineStageStatus,
   type ProjectFileEntry,
   type ProjectWorkspace,
@@ -21,10 +32,13 @@ import {
 import { extractProgramId } from "@/lib/programId";
 import { isParserOk } from "@/lib/singleFileWorkspace";
 import { analyzeCobol, convertCobol, parseCobol } from "@/lib/api";
+import { queueTestingLaunch } from "@/lib/testingLaunch";
+import { persistTestingReplayWorkspace } from "@/lib/testingReplayHandoff";
+import { persistTestingTargetMode } from "@/lib/testingService";
 import * as historyService from "@/services/historyService";
 import type { ProjectWorkspaceSnapshot } from "@/services/historyService";
 
-type TabKey = "parser" | "analysis" | "java";
+type TabKey = "parser" | "analysis" | "java" | "score";
 
 function downloadText(filename: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
@@ -36,29 +50,17 @@ function downloadText(filename: string, content: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
-function badgeClass(type: ProjectFileEntry["type"]) {
-  if (type === "cbl") return { label: ".cbl", bg: "rgba(14, 165, 233, 0.25)", color: "#7dd3fc" };
-  if (type === "jcl") return { label: ".jcl", bg: "rgba(251, 146, 60, 0.25)", color: "#fdba74" };
-  if (type === "cpy") return { label: ".cpy", bg: "rgba(244, 114, 182, 0.25)", color: "#f9a8d4" };
-  return { label: "file", bg: "rgba(148, 163, 184, 0.2)", color: "#cbd5e1" };
-}
-
-function statusGlyph(s: PipelineStageStatus) {
-  if (s === "idle") return "—";
-  if (s === "running") return "⏳";
-  if (s === "done") return "✅";
-  return "❌";
-}
-
 function normalizeProjectPath(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
 export default function ProjectConvertPage() {
+  const router = useRouter();
   const [workspace, setWorkspace] = useState<ProjectWorkspace | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<TabKey>("parser");
   const [runBusy, setRunBusy] = useState(false);
+  const [retryBusyPath, setRetryBusyPath] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -79,7 +81,11 @@ export default function ProjectConvertPage() {
             parserOutput: f.parserOutput,
             analysisOutput: f.analysisOutput,
             javaOutput: f.javaOutput,
-            score: null,
+            score:
+              scoreListValue(normalizeConversionScore(f.conversionScore)) ??
+              f.score ??
+              null,
+            conversionScore: normalizeConversionScore(f.conversionScore) ?? null,
           }));
           const ws = newProjectWorkspace(snap.projectName, files);
           setWorkspace(ws);
@@ -92,7 +98,15 @@ export default function ProjectConvertPage() {
       } else {
         const w = loadProjectWorkspace();
         if (w) {
-          setWorkspace(w);
+          const files = w.files.map((f) => {
+            const normalizedScore = normalizeConversionScore(f.conversionScore);
+            return {
+              ...f,
+              conversionScore: normalizedScore,
+              score: scoreListValue(normalizedScore) ?? f.score ?? null,
+            };
+          });
+          setWorkspace({ ...w, files });
           setSelectedPath(w.files[0]?.path ?? null);
         }
       }
@@ -110,6 +124,20 @@ export default function ProjectConvertPage() {
     selected?.type === "cbl"
       ? extractProgramId(selected.sourceCode) || selected.filename.replace(/\.(cbl|cob)$/i, "") || "Program"
       : "";
+
+  const canRunTesting = Boolean(
+    workspace?.files.some((f) => f.type === "cbl" && f.javaOutput?.trim()),
+  );
+
+  const goToTesting = useCallback(() => {
+    if (workspace) {
+      saveProjectWorkspace(workspace);
+      persistTestingReplayWorkspace({ mode: "project", workspace });
+    }
+    queueTestingLaunch({ mode: "project", autoRun: true, source: "conversion" });
+    persistTestingTargetMode("project");
+    router.push("/testing");
+  }, [router, workspace]);
 
   const ingestZip = useCallback(async (file: File) => {
     const buf = await file.arrayBuffer();
@@ -164,8 +192,23 @@ export default function ProjectConvertPage() {
           path: normalizeProjectPath(f.path),
           filename: f.filename,
           sourceCode: f.sourceCode,
+          parserOutput: f.parserOutput,
+          analysisOutput: f.analysisOutput,
         }));
-      const ordered = topologicalCobolOrder(cobolSnapshots);
+
+      const RUN_ALL_ORDER = [
+        "CALCFEE.cbl",
+        "CHKAML.cbl",
+        "LOANEVAL.cbl",
+        "RISKSCOR.cbl",
+        "RPTMONTH.cbl",
+        "RECOVRY.cbl",
+      ];
+      const sorted = [...cobolSnapshots].sort((a, b) => {
+        const ai = RUN_ALL_ORDER.indexOf(a.filename);
+        const bi = RUN_ALL_ORDER.indexOf(b.filename);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      });
 
       const updateFile = (pathKey: string, partial: Partial<ProjectFileEntry>) => {
         const key = normalizeProjectPath(pathKey);
@@ -181,27 +224,39 @@ export default function ProjectConvertPage() {
         });
       };
 
-      for (let i = 0; i < ordered.length; i++) {
-        const file = ordered[i];
+      const convertOneFile = async (file: (typeof sorted)[number]) => {
         const path = file.path;
         const expanded = expandCopybooks(file.sourceCode, fileMapSnapshot);
 
-        updateFile(path, { parserStatus: "running", stageErrors: undefined });
         try {
-          const parserOutput = await parseCobol(expanded);
-          if (!isParserOk(parserOutput)) {
-            const errs = (parserOutput as { preflight_errors?: string[] })?.preflight_errors ?? [];
-            updateFile(path, {
-              parserStatus: "error",
-              parserOutput,
-              stageErrors: { parser: errs.join("; ") },
-            });
-            continue;
+          let parserOutput = file.parserOutput;
+          if (parserOutput && isParserOk(parserOutput)) {
+            updateFile(path, { parserStatus: "done", parserOutput, stageErrors: undefined });
+          } else {
+            updateFile(path, { parserStatus: "running", stageErrors: undefined });
+            parserOutput = await parseCobol(expanded);
+            if (!isParserOk(parserOutput)) {
+              const errs =
+                (parserOutput as { preflight_errors?: string[] })?.preflight_errors ?? [];
+              updateFile(path, {
+                parserStatus: "error",
+                parserOutput,
+                stageErrors: { parser: errs.join("; ") },
+              });
+              return;
+            }
+            updateFile(path, { parserStatus: "done", parserOutput });
           }
-          updateFile(path, { parserStatus: "done", parserOutput });
 
+          const reusedAnalysis =
+            file.analysisOutput &&
+            typeof file.analysisOutput === "object" &&
+            (file.analysisOutput as { analysis_engine?: string }).analysis_engine !== "n/a";
+          let analysisOutput = file.analysisOutput;
+          if (reusedAnalysis) {
+            updateFile(path, { analysisStatus: "done", analysisOutput });
+          } else {
           updateFile(path, { analysisStatus: "running" });
-          let analysisOutput;
           try {
             analysisOutput = await analyzeCobol(expanded, parserOutput);
           } catch (e) {
@@ -209,7 +264,7 @@ export default function ProjectConvertPage() {
               analysisStatus: "error",
               stageErrors: { analysis: e instanceof Error ? e.message : "analysis failed" },
             });
-            continue;
+            return;
           }
           const halted =
             analysisOutput &&
@@ -221,14 +276,40 @@ export default function ProjectConvertPage() {
               analysisStatus: "error",
               stageErrors: { analysis: "Analysis halted" },
             });
-            continue;
+            return;
           }
           updateFile(path, { analysisStatus: "done", analysisOutput });
+          }
 
           updateFile(path, { conversionStatus: "running" });
           try {
-            const java = await convertCobol(expanded, parserOutput, analysisOutput);
-            updateFile(path, { conversionStatus: "done", javaOutput: java });
+            const {
+              javaCode,
+              conversionScore,
+              conversionStatus,
+              compileErrors,
+              compileStderr,
+              compileRepairNotes,
+              repairSummary,
+            } = await convertCobol(expanded, parserOutput, analysisOutput);
+            verifyConversionProgram(file.filename, parserOutput);
+            const isPartial = conversionStatus === "partial";
+            const compileMsg =
+              isPartial && compileErrors?.length
+                ? compileErrors.join("\n")
+                : isPartial && compileStderr
+                  ? compileStderr.slice(0, 2000)
+                  : undefined;
+            updateFile(path, {
+              conversionStatus: isPartial ? "partial" : "done",
+              javaOutput: javaCode,
+              conversionScore,
+              score: scoreListValue(conversionScore),
+              compileRepairNotes: compileRepairNotes?.length ? compileRepairNotes : undefined,
+              repairSummary: repairSummary ?? undefined,
+              compileErrors: compileErrors?.length ? compileErrors : undefined,
+              stageErrors: compileMsg ? { java: compileMsg } : undefined,
+            });
           } catch (e) {
             updateFile(path, {
               conversionStatus: "error",
@@ -241,7 +322,11 @@ export default function ProjectConvertPage() {
             stageErrors: { parser: e instanceof Error ? e.message : "parse failed" },
           });
         }
-      }
+      };
+
+      // All programs in parallel — wall clock = slowest single program (~LOANEVAL), not sum of groups.
+      const toRun = sorted.filter((p) => p.filename.endsWith(".cbl"));
+      await Promise.allSettled(toRun.map((p) => convertOneFile(p)));
     } finally {
       setRunBusy(false);
     }
@@ -264,6 +349,7 @@ export default function ProjectConvertPage() {
         javaOutput: null,
         stageErrors: undefined,
         score: null,
+        conversionScore: null,
       })),
     };
     setWorkspace(cleared);
@@ -276,8 +362,8 @@ export default function ProjectConvertPage() {
     const zip = new JSZip();
     for (const f of workspace.files) {
       if (f.type !== "cbl" || !f.javaOutput) continue;
-      const stub = f.filename.replace(/\.(cbl|cob)$/i, "") || "Program";
-      zip.file(`${stub}.java`, f.javaOutput);
+      const programName = programKeyFromEntry(f);
+      zip.file(`${programName}.java`, f.javaOutput);
     }
     const blob = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(blob);
@@ -288,24 +374,176 @@ export default function ProjectConvertPage() {
     URL.revokeObjectURL(url);
   };
 
-  const saveFileToHistory = () => {
-    if (!selected || selected.type !== "cbl") return;
-    const paragraphs = (selected.parserOutput as { paragraphs?: unknown[] } | null)?.paragraphs;
-    const paragraphCount = Array.isArray(paragraphs) ? paragraphs.length : 0;
-    historyService.add({
-      id: crypto.randomUUID(),
-      type: "single",
-      programName: extractProgramId(selected.sourceCode),
-      createdAt: new Date().toISOString(),
-      paragraphCount,
-      score: null,
-      cost: null,
-      parserOutput: selected.parserOutput,
-      analysisOutput: selected.analysisOutput,
-      javaOutput: selected.javaOutput,
-      sourceCode: selected.sourceCode,
-    });
-    alert("Saved to History.");
+  const buildProjectSnapshot = (): ProjectWorkspaceSnapshot | null => {
+    if (!workspace) return null;
+    return {
+      projectName: workspace.projectName,
+      files: workspace.files.map((f) => ({
+        filename: f.filename,
+        path: f.path,
+        type: f.type,
+        sourceCode: f.sourceCode,
+        parserOutput: f.parserOutput,
+        analysisOutput: f.analysisOutput,
+        javaOutput: f.javaOutput,
+        parserStatus: f.parserStatus,
+        analysisStatus: f.analysisStatus,
+        conversionStatus: f.conversionStatus,
+        score: f.score,
+        conversionScore: f.conversionScore ?? null,
+      })),
+    };
+  };
+
+  const saveProjectToHistory = () => {
+    if (!workspace) return;
+    const snap = buildProjectSnapshot();
+    if (!snap) return;
+    const cbl = workspace.files.filter((f) => f.type === "cbl");
+    const scores = cbl.map((f) => f.score).filter((s): s is number => typeof s === "number");
+    const avgScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+    void historyService
+      .addAsync({
+        id: crypto.randomUUID(),
+        type: "project",
+        programName: workspace.projectName,
+        createdAt: new Date().toISOString(),
+        score: avgScore,
+        cost: null,
+        parserOutput: cbl[0]?.parserOutput ?? null,
+        analysisOutput: cbl[0]?.analysisOutput ?? null,
+        javaOutput: null,
+        complexityLabel: complexityFromAnalyses(cbl.map((f) => f.analysisOutput)),
+        projectSnapshot: snap,
+        conversionScoreRaw: cbl[0]?.conversionScore ?? null,
+      })
+      .then(() => alert("Project saved to History (database)."))
+      .catch((err) => alert(err instanceof Error ? err.message : "Failed to save history"));
+  };
+
+  const retryFileStep = async (path: string, step: ProjectRetryStep) => {
+    if (!workspace || runBusy || retryBusyPath) return;
+    const file = workspace.files.find((f) => normalizeProjectPath(f.path) === normalizeProjectPath(path));
+    if (!file || file.type !== "cbl") return;
+
+    setRetryBusyPath(path);
+    const fileMapSnapshot = new Map<string, string>();
+    for (const f of workspace.files) {
+      fileMapSnapshot.set(normalizeProjectPath(f.path), f.sourceCode);
+      fileMapSnapshot.set(f.filename, f.sourceCode);
+    }
+    const expanded = expandCopybooks(file.sourceCode, fileMapSnapshot);
+    const pathKey = normalizeProjectPath(path);
+
+    const patch = (partial: Partial<ProjectFileEntry>) => {
+      setWorkspace((w) => {
+        if (!w) return w;
+        return {
+          ...w,
+          updatedAt: new Date().toISOString(),
+          files: w.files.map((f) =>
+            normalizeProjectPath(f.path) === pathKey ? { ...f, ...partial } : f,
+          ),
+        };
+      });
+    };
+
+    try {
+      if (step === "parser") {
+        patch({
+          parserStatus: "running",
+          analysisStatus: "idle",
+          conversionStatus: "idle",
+          parserOutput: null,
+          analysisOutput: null,
+          javaOutput: null,
+          conversionScore: null,
+          score: null,
+          stageErrors: undefined,
+        });
+        const parserOutput = await parseCobol(expanded);
+        if (!isParserOk(parserOutput)) {
+          const errs = (parserOutput as { preflight_errors?: string[] })?.preflight_errors ?? [];
+          patch({ parserStatus: "error", parserOutput, stageErrors: { parser: errs.join("; ") } });
+          return;
+        }
+        patch({ parserStatus: "done", parserOutput });
+        return;
+      }
+
+      if (step === "analysis") {
+        if (!file.parserOutput || !isParserOk(file.parserOutput)) return;
+        patch({
+          analysisStatus: "running",
+          conversionStatus: "idle",
+          analysisOutput: null,
+          javaOutput: null,
+          conversionScore: null,
+          score: null,
+          stageErrors: { ...file.stageErrors, analysis: undefined, java: undefined },
+        });
+        const analysisOutput = await analyzeCobol(expanded, file.parserOutput);
+        const halted =
+          analysisOutput &&
+          typeof analysisOutput === "object" &&
+          (analysisOutput as { analysis_engine?: string }).analysis_engine === "n/a";
+        if (halted) {
+          patch({
+            analysisOutput,
+            analysisStatus: "error",
+            stageErrors: { analysis: "Analysis halted" },
+          });
+          return;
+        }
+        patch({ analysisStatus: "done", analysisOutput });
+        return;
+      }
+
+      if (step === "java") {
+        if (!file.parserOutput || !file.analysisOutput) return;
+        patch({
+          conversionStatus: "running",
+          javaOutput: null,
+          conversionScore: null,
+          score: null,
+          stageErrors: { ...file.stageErrors, java: undefined },
+        });
+        const {
+          javaCode,
+          conversionScore,
+          conversionStatus,
+          compileErrors,
+          compileStderr,
+          compileRepairNotes,
+          repairSummary,
+        } = await convertCobol(expanded, file.parserOutput, file.analysisOutput);
+        verifyConversionProgram(file.filename, file.parserOutput);
+        const isPartial = conversionStatus === "partial";
+        const compileMsg =
+          isPartial && compileErrors?.length
+            ? compileErrors.join("\n")
+            : isPartial && compileStderr
+              ? compileStderr.slice(0, 2000)
+              : undefined;
+        patch({
+          conversionStatus: isPartial ? "partial" : "done",
+          javaOutput: javaCode,
+          conversionScore,
+          score: scoreListValue(conversionScore),
+          compileRepairNotes: compileRepairNotes?.length ? compileRepairNotes : undefined,
+          repairSummary: repairSummary ?? undefined,
+          compileErrors: compileErrors?.length ? compileErrors : undefined,
+          stageErrors: compileMsg ? { java: compileMsg } : undefined,
+        });
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Stage failed";
+      if (step === "parser") patch({ parserStatus: "error", stageErrors: { parser: msg } });
+      if (step === "analysis") patch({ analysisStatus: "error", stageErrors: { analysis: msg } });
+      if (step === "java") patch({ conversionStatus: "error", stageErrors: { java: msg } });
+    } finally {
+      setRetryBusyPath(null);
+    }
   };
 
   return (
@@ -337,11 +575,16 @@ export default function ProjectConvertPage() {
         <button
           type="button"
           className="action-button primary"
-          disabled={!workspace || runBusy}
+          disabled={!workspace || runBusy || !!retryBusyPath}
           onClick={() => void runAll()}
         >
           ▶ Run All
         </button>
+        {canRunTesting ? (
+          <button type="button" className="action-button primary" disabled={runBusy} onClick={goToTesting}>
+            Run Testing
+          </button>
+        ) : null}
         <button type="button" className="action-button secondary" disabled={!workspace} onClick={() => void downloadAllJava()}>
           ⬇ Download All Java
         </button>
@@ -362,39 +605,14 @@ export default function ProjectConvertPage() {
 
       {workspace && (
         <div className="project-layout">
-          <div className="file-list">
-            <div className="file-list-header">{workspace.projectName}</div>
-            {workspace.files.map((f) => {
-              const b = badgeClass(f.type);
-              const active = f.path === selectedPath;
-              return (
-                <button
-                  key={f.path}
-                  type="button"
-                  className={`file-item ${active ? "active" : ""}`}
-                  onClick={() => setSelectedPath(f.path)}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div className="file-path">{f.filename}</div>
-                    <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-                      <span className="stage-badge" style={{ background: b.bg, color: b.color, borderColor: b.color }}>
-                        {b.label}
-                      </span>
-                      <span className="stage-badge parser" style={{ fontSize: 10, padding: "4px 8px" }}>
-                        Parse {statusGlyph(f.parserStatus)}
-                      </span>
-                      <span className="stage-badge analysis" style={{ fontSize: 10, padding: "4px 8px" }}>
-                        Analyze {statusGlyph(f.analysisStatus)}
-                      </span>
-                      <span className="stage-badge java" style={{ fontSize: 10, padding: "4px 8px" }}>
-                        Convert {statusGlyph(f.conversionStatus)}
-                      </span>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+          <FileTree
+            files={workspace.files}
+            selectedPath={selectedPath}
+            onSelect={setSelectedPath}
+            retryBusyPath={retryBusyPath}
+            onRetry={(path, step) => void retryFileStep(path, step)}
+            retryCapabilities={getFileRetryCapabilities}
+          />
 
           <div className="output-card">
             {!selected && <p style={{ color: "var(--text-muted)" }}>Select a file.</p>}
@@ -409,13 +627,16 @@ export default function ProjectConvertPage() {
                           ["parser", "Parser Output"],
                           ["analysis", "Analysis Output"],
                           ["java", "Java Output"],
+                          ["score", "Quality Score"],
                         ] as const
                       ).map(([id, label]) => (
                         <button
                           key={id}
                           type="button"
                           className={`stage-tab ${detailTab === id ? "active" : ""}`}
-                          data-stage={id === "parser" ? "parser" : id === "analysis" ? "analysis" : "java"}
+                          data-stage={
+                            id === "parser" ? "parser" : id === "analysis" ? "analysis" : id === "java" ? "java" : "tests"
+                          }
                           style={{ border: "none", cursor: "pointer" }}
                           onClick={() => setDetailTab(id)}
                         >
@@ -467,8 +688,30 @@ export default function ProjectConvertPage() {
                         </div>
                       </div>
                     )}
+                    {detailTab === "score" && (
+                      <div className="score-tab-stack">
+                        <RepairSummaryPanel
+                          conversionStatus={pipelineToConversionStatus(selected.conversionStatus)}
+                          conversionScore={selected.conversionScore}
+                          repairSummary={selected.repairSummary}
+                          compileRepairNotes={selected.compileRepairNotes}
+                        />
+                        <ScoreCard score={selected.conversionScore ?? null} />
+                        <SmokeTestPanel smokeTest={(selected as Record<string, unknown>).smokeTest ?? null} />
+                      </div>
+                    )}
+
                     {detailTab === "java" && (
                       <div>
+                        {(selected.repairSummary || selected.compileRepairNotes?.length) ? (
+                          <RepairSummaryPanel
+                            conversionStatus={pipelineToConversionStatus(selected.conversionStatus)}
+                            conversionScore={selected.conversionScore}
+                            repairSummary={selected.repairSummary}
+                            compileRepairNotes={selected.compileRepairNotes}
+                            compact
+                          />
+                        ) : null}
                         <MonacoJavaViewer value={selected.javaOutput ?? ""} height="400px" />
                         <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
                           <button
@@ -494,8 +737,8 @@ export default function ProjectConvertPage() {
                       </div>
                     )}
                     <div style={{ marginTop: 12 }}>
-                      <button type="button" className="action-button primary" onClick={saveFileToHistory}>
-                        💾 Save to History
+                      <button type="button" className="action-button primary" onClick={saveProjectToHistory}>
+                        💾 Save project to History
                       </button>
                     </div>
                   </div>

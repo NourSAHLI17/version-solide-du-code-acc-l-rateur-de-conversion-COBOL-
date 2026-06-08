@@ -15,6 +15,10 @@ class AnalyzeRequest(BaseModel):
 
     source_code: str = Field(..., description="Raw COBOL program text.")
     parser_output: dict = Field(default_factory=dict, description="Parser-layer structured output.")
+    force_refresh: bool = Field(
+        False,
+        description="When true, bypass file-based analysis cache and re-run the analyzer.",
+    )
 
     @field_validator("parser_output", mode="before")
     @classmethod
@@ -38,6 +42,10 @@ class ConvertRequest(BaseModel):
     source_code: str = Field(..., description="Raw COBOL program text.")
     parser_output: dict = Field(..., description="Parser-layer structured output.")
     analysis_output: str = Field(..., description="Analysis-agent JSON output.")
+    java_profile: Optional[str] = Field(
+        None,
+        description="Target Java runtime: plain_java | spring_boot | java_ee | quarkus (default plain_java).",
+    )
 
 
 class ValidateRequest(BaseModel):
@@ -72,6 +80,7 @@ class SmartConvertRequest(BaseModel):
     source_code: str = Field(..., description="Raw COBOL program text.")
     parser_output: Optional[dict] = Field(None, description="Optional pre-computed parser output.")
     analysis_output: Optional[str] = Field(None, description="Optional pre-computed analysis output.")
+    java_profile: Optional[str] = Field(None, description="Target Java runtime profile.")
 
 
 class PipelineModeRequest(BaseModel):
@@ -80,6 +89,7 @@ class PipelineModeRequest(BaseModel):
     mode: str = Field("full", description="Mode: full | parse_only | parse_analyse | analyse_only | convert_only | no_parse")
     parser_output: Optional[dict] = Field(None, description="Optional pre-computed parser output.")
     analysis_output: Optional[str] = Field(None, description="Optional pre-computed analysis output.")
+    java_profile: Optional[str] = Field(None, description="Target Java runtime profile.")
 
 
 class ProjectFile(BaseModel):
@@ -99,6 +109,7 @@ class ProjectPipelineRequest(BaseModel):
     """Request body for running pipeline over uploaded project files."""
     files: List[dict] = Field(..., description="File tree from upload endpoint.")
     mode: str = Field("full", description="Mode: full | parse_only | parse_analyse | analyse_only | convert_only | no_parse")
+    java_profile: Optional[str] = Field(None, description="Target Java runtime profile for all conversions.")
 
 
 class DownloadJavaRequest(BaseModel):

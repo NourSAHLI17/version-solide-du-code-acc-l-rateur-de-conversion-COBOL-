@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
+  // Allow HMR WebSocket when the app is opened via 127.0.0.1 while the dev server uses localhost (or vice versa).
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   turbopack: {
     root: appRoot,
   },

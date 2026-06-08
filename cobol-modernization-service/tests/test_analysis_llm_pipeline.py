@@ -70,10 +70,10 @@ class AnalysisLLMPipelineTests(unittest.TestCase):
         mock_conv.invoke_prompt.assert_called()
         tokens_used = [c.kwargs.get("max_output_tokens") for c in mock_conv.invoke_prompt.call_args_list]
         self.assertIn(512, tokens_used)
-        self.assertIn(8192, tokens_used)
+        self.assertIn(4096, tokens_used)
         chunk_calls = [
             c for c in mock_conv.invoke_prompt.call_args_list
-            if c.kwargs.get("max_output_tokens") == 8192
+            if c.kwargs.get("max_output_tokens") == 4096
         ]
         self.assertTrue(len(chunk_calls) >= 1)
         inner = chunk_calls[0][0][1]
@@ -172,7 +172,7 @@ class AnalysisLLMPipelineTests(unittest.TestCase):
         mock_conv.invoke_prompt.assert_called()
         chunk_calls = [
             c for c in mock_conv.invoke_prompt.call_args_list
-            if c.kwargs.get("max_output_tokens") == 8192
+            if c.kwargs.get("max_output_tokens") == 4096
         ]
         self.assertTrue(chunk_calls)
         excerpt = chunk_calls[0][0][1]["cobol_source_excerpt"]
@@ -249,6 +249,28 @@ class AnalysisLLMPipelineTests(unittest.TestCase):
         combined = big.upper()
         self.assertRegex(combined, r"DISPLAY")
         self.assertTrue("HI" in combined or "ALPHA" in combined or "STOP" in combined)
+
+
+class ImportCycleRegressionTests(unittest.TestCase):
+    """Verify the parser<->converter circular import is broken."""
+
+    def test_parser_converter_modules_import_without_cycle(self):
+        import importlib
+
+        for mod_name in (
+            "app.parsers.cobol_parser",
+            "app.converters.cobol_name_converter",
+            "app.converters.record_layout",
+            "app.converters.rewrite_record",
+        ):
+            importlib.reload(importlib.import_module(mod_name))
+
+    def test_parser_layer_instantiable_after_converter_import(self):
+        from app.converters.record_layout import pic_display_byte_size
+        from app.parsers.cobol_parser import ParserLayer
+
+        self.assertIsNotNone(ParserLayer())
+        self.assertGreater(pic_display_byte_size("9(5)"), 0)
 
 
 if __name__ == "__main__":
