@@ -34,5 +34,4 @@ canonical source; updates should be mirrored to `../docs/architecture/` when cha
 | Folder | Role |
 |---|---|
 | `../cobol-modernization-dashboard/` | Next.js frontend |
-| `../cobol-modernization-ai/` | Early design reference markdown only |
 | `../acme-bank-v3/` | COBOL test case (6 programs) |

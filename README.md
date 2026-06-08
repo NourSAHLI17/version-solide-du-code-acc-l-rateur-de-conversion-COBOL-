@@ -53,8 +53,6 @@ cobol/
 │   ├── src/lib/                      ← shared workspace persistence
 │   └── src/services/                 ← API client
 │
-├── cobol-modernization-ai/           ← design reference markdown only (no Python app/)
-│
 ├── acme-bank-v3/                     ← ACME Bank COBOL test case (6 programs)
 │   ├── src/                          ← LOANEVAL, RISKSCOR, CALCFEE, CHKAML, RECOVRY, RPTMONTH
 │   ├── copybooks/
