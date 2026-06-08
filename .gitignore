@@ -28,6 +28,9 @@ Thumbs.db
 *.class
 *.jar
 
+# Local dev iteration artifacts (cursor prompts, fix plans — not for repo)
+fixes/
+
 # Project specific
 .agents/
 .antlr/

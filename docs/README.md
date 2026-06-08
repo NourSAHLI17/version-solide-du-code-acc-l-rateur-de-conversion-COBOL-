@@ -18,10 +18,6 @@ Start with `architecture/ARCHITECTURE_README.md`, then read the `ARCH_*.md` seri
 | [architecture/ANALYSIS_AGENT_SPECS.md](./architecture/ANALYSIS_AGENT_SPECS.md) | Analysis agent specification |
 | [architecture/SCHEMA_CONTRACTS.md](./architecture/SCHEMA_CONTRACTS.md) | Cross-cutting schemas |
 
-## Internal dev notes
-
-Iteration notes, fix plans, and prompts: `dev-notes/` (not required for architecture review).
-
 ## Code locations
 
 | Area | Path |

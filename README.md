@@ -28,8 +28,6 @@ cobol/
 │   │   ├── SCHEMA_CONTRACTS.md
 │   │   ├── DEVELOPER_GUIDE.md
 │   │   └── … (layer specs, API contracts, diagrams)
-│   │
-│   └── dev-notes/                    ← internal iteration notes (not required for review)
 │
 ├── cobol-modernization-service/      ← Python / FastAPI backend (active implementation)
 │   ├── app/
@@ -59,8 +57,7 @@ cobol/
 │   ├── data/
 │   └── jcl/
 │
-├── grammars_v4_master/               ← ANTLR v4 grammar collection (reference)
-└── exported-assets/                  ← generated Java / compiled outputs from pipeline runs
+└── grammars_v4_master/               ← ANTLR v4 grammar collection (reference)
 ```
 
 ---
@@ -85,13 +82,6 @@ Production documents aligned with `cobol-modernization-service/`. They describe 
 staged pipeline: JCL parse → COPY resolve → hybrid COBOL parse → context enrichment →
 LLM analysis → Java conversion (whole-class or constrained) → compile/repair →
 behavioral testing → download.
-
-### Internal dev notes (`docs/dev-notes/`)
-
-Fix series, improvement plans, prompts, and verification artifacts from development.
-Not required for architecture review.
-
----
 
 ## Getting started
 
