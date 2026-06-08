@@ -17,6 +17,7 @@ build/
 .npm
 .eslintcache
 *.local
+!.env.local.example
 
 # IDE / OS
 .vscode/
